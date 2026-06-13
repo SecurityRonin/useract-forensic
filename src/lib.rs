@@ -371,7 +371,8 @@ pub fn from_srum(
     let mut acts = Vec::with_capacity(network.len() + app_usage.len());
 
     for r in network {
-        let actor = resolve_id(r.user_id, id_map).unwrap_or_else(|| format!("user-id:{}", r.user_id));
+        let actor =
+            resolve_id(r.user_id, id_map).unwrap_or_else(|| format!("user-id:{}", r.user_id));
         let app = resolve_id(r.app_id, id_map).unwrap_or_else(|| format!("app-id:{}", r.app_id));
         acts.push(UserActivity {
             timestamp: Some(r.timestamp.timestamp()),
@@ -387,7 +388,8 @@ pub fn from_srum(
     }
 
     for r in app_usage {
-        let actor = resolve_id(r.user_id, id_map).unwrap_or_else(|| format!("user-id:{}", r.user_id));
+        let actor =
+            resolve_id(r.user_id, id_map).unwrap_or_else(|| format!("user-id:{}", r.user_id));
         let app = resolve_id(r.app_id, id_map).unwrap_or_else(|| format!("app-id:{}", r.app_id));
         acts.push(UserActivity {
             timestamp: Some(r.timestamp.timestamp()),
@@ -548,10 +550,7 @@ pub fn from_userassist(
             action: Action::Executed,
             subject: Subject::Command(e.program.clone()),
             source: SourceKind::Registry,
-            detail: format!(
-                "UserAssist: {} run {} time(s)",
-                e.program, e.run_count
-            ),
+            detail: format!("UserAssist: {} run {} time(s)", e.program, e.run_count),
         })
         .collect()
 }
@@ -700,7 +699,9 @@ pub fn device_file_volume_joins(events: &[UserActivity]) -> Vec<(usize, usize)> 
 /// [`UserActivity::detail`]. Non-file subjects yield [`None`].
 fn file_volume_serial(activity: &UserActivity) -> Option<u32> {
     let structured = match &activity.subject {
-        Subject::File { volume_serial, .. } | Subject::Folder { volume_serial, .. } => *volume_serial,
+        Subject::File { volume_serial, .. } | Subject::Folder { volume_serial, .. } => {
+            *volume_serial
+        }
         _ => return None,
     };
     if structured.is_some() {
@@ -758,7 +759,11 @@ pub fn audit_with(events: &[UserActivity], src: &Source) -> Vec<Finding> {
     // USERACT-FILE-ON-EXTERNAL-DEVICE — a file/folder accessed on a volume whose
     // serial matches a connected external device (the volume-serial join).
     for (di, fi) in device_file_volume_joins(events) {
-        findings.push(file_on_external_device_finding(&events[di], &events[fi], src));
+        findings.push(file_on_external_device_finding(
+            &events[di],
+            &events[fi],
+            src,
+        ));
     }
 
     for event in events {
@@ -862,7 +867,7 @@ fn srum_network_bytes_sent(activity: &UserActivity) -> Option<u64> {
 fn network_exfil_volume_finding(event: &UserActivity, bytes_sent: u64, src: &Source) -> Finding {
     let app = match &event.subject {
         Subject::Command(c) => c.as_str(),
-        _ => event.detail.as_str(),
+        _ => event.detail.as_str(), // cov:unreachable: caller is a SRUM network row, always Subject::Command
     };
     let actor = event.actor.as_deref().unwrap_or("(unattributed)");
     Finding::observation(
@@ -892,18 +897,18 @@ fn file_on_external_device_finding(
 ) -> Finding {
     let path = match &file.subject {
         Subject::File { path, .. } | Subject::Folder { path, .. } => path.as_str(),
-        _ => file.detail.as_str(),
+        _ => file.detail.as_str(), // cov:unreachable: join only pairs File/Folder subjects here
     };
     let dev_id = match &device.subject {
         Subject::Device { id, .. } => id.as_str(),
-        _ => device.detail.as_str(),
+        _ => device.detail.as_str(), // cov:unreachable: join only pairs Device subjects here
     };
     let serial = match &device.subject {
         Subject::Device {
             volume_serial: Some(s),
             ..
         } => *s,
-        _ => 0,
+        _ => 0, // cov:unreachable: join requires Device { volume_serial: Some(_) }
     };
     Finding::observation(
         Severity::Medium,
@@ -1443,6 +1448,26 @@ mod tests {
             .all(|f| f.code != "USERACT-NETWORK-EXFIL-VOLUME"));
     }
 
+    #[test]
+    fn audit_skips_exfil_check_for_srum_app_usage_rows() {
+        // An app-usage SRUM row carries CPU cycles, not bytes, so its detail has no
+        // bytes-sent prefix: the exfil check sees None and never fires (regardless
+        // of how large the cycle counts are).
+        let app = [AppUsageRecord {
+            app_id: 1,
+            user_id: 1,
+            timestamp: utc(1),
+            foreground_cycles: u64::MAX,
+            background_cycles: u64::MAX,
+            auto_inc_id: 0,
+        }];
+        let acts = from_srum(&[], &app, &[]);
+        let findings = audit(&acts);
+        assert!(findings
+            .iter()
+            .all(|f| f.code != "USERACT-NETWORK-EXFIL-VOLUME"));
+    }
+
     // ── winreg-artifacts adapter (v0.2) ───────────────────────────────────────
 
     use winreg_artifacts::shellbags::ShellbagEntry;
@@ -1680,8 +1705,18 @@ mod tests {
 
     #[test]
     fn lnk_file_joins_connected_device_on_volume_serial() {
-        let links = [shell_link(Some("E:\\loot.zip"), Some(0xCAFE_F00D), 100, None)];
-        let conns = [device("USBSTOR\\Disk", Bus::Usb, Some(50), Some(0xCAFE_F00D))];
+        let links = [shell_link(
+            Some("E:\\loot.zip"),
+            Some(0xCAFE_F00D),
+            100,
+            None,
+        )];
+        let conns = [device(
+            "USBSTOR\\Disk",
+            Bus::Usb,
+            Some(50),
+            Some(0xCAFE_F00D),
+        )];
         let lnk = LnkSource::new(&links, Some("alice"));
         let devices = DeviceSource::new(&conns);
         let timeline = build_timeline(&[&lnk, &devices]);
