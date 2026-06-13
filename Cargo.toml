@@ -31,8 +31,6 @@ srum-core = "0.1"
 winreg-artifacts = "0.1"
 lnk-core = "0.1"
 forensicnomicon = "0.5"
-
-[dev-dependencies]
 chrono = { version = "0.4", default-features = false }
 
 [lints]

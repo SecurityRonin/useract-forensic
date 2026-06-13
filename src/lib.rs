@@ -405,6 +405,157 @@ pub fn from_srum(
     acts
 }
 
+/// Parse an ISO-8601 `%Y-%m-%dT%H:%M:%SZ` UTC timestamp (the form
+/// `winreg-artifacts` emits) into Unix epoch seconds. Returns [`None`] for an
+/// absent or unparseable value — a missing timestamp is forensically meaningful,
+/// not an error.
+fn iso8601_to_epoch(s: Option<&str>) -> Option<i64> {
+    let s = s?;
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp())
+}
+
+/// A [`RegistrySource`] wraps borrowed per-user registry artifacts decoded by
+/// `winreg-artifacts` from an `NTUSER.DAT` / `USRCLASS.DAT` hive.
+///
+/// It normalizes the three published per-user artifacts:
+/// [`UserAssist`](winreg_artifacts::userassist) → [`Action::Executed`],
+/// [`TypedURLs`](winreg_artifacts::typed_urls) → [`Action::Typed`], and
+/// [`ShellBags`](winreg_artifacts::shellbags) → [`Action::Accessed`] (folder).
+///
+/// `winreg-artifacts` v0.1 publishes exactly these three per-user decoders; it has
+/// no separate RecentDocs / RunMRU / MountPoints2 / TypedPaths modules, so the
+/// adapter maps the artifacts that actually exist.
+pub struct RegistrySource<'a> {
+    userassist: &'a [winreg_artifacts::userassist::UserAssistEntry],
+    typed_urls: &'a [winreg_artifacts::typed_urls::TypedUrl],
+    shellbags: &'a [winreg_artifacts::shellbags::ShellbagEntry],
+    actor: Option<String>,
+}
+
+impl<'a> RegistrySource<'a> {
+    /// Wrap decoded registry artifacts, attributing them to a user when known (the
+    /// hive owner — the SID/account the `NTUSER.DAT` belongs to).
+    #[must_use]
+    pub fn new(
+        userassist: &'a [winreg_artifacts::userassist::UserAssistEntry],
+        typed_urls: &'a [winreg_artifacts::typed_urls::TypedUrl],
+        shellbags: &'a [winreg_artifacts::shellbags::ShellbagEntry],
+        actor: Option<&str>,
+    ) -> Self {
+        Self {
+            userassist,
+            typed_urls,
+            shellbags,
+            actor: actor.map(ToString::to_string),
+        }
+    }
+}
+
+impl ActivitySource for RegistrySource<'_> {
+    fn activities(&self) -> Vec<UserActivity> {
+        from_registry(
+            self.userassist,
+            self.typed_urls,
+            self.shellbags,
+            self.actor.as_deref(),
+        )
+    }
+}
+
+/// Normalize UserAssist entries into [`Action::Executed`] [`UserActivity`] events.
+///
+/// Each entry → an `Executed` activity whose subject is the program path; the run
+/// count is carried in `detail` and the ROT13-decoded last-run timestamp parsed to
+/// epoch. The `actor` (the hive owner) is carried when known.
+#[must_use]
+pub fn from_userassist(
+    entries: &[winreg_artifacts::userassist::UserAssistEntry],
+    actor: Option<&str>,
+) -> Vec<UserActivity> {
+    entries
+        .iter()
+        .map(|e| UserActivity {
+            timestamp: iso8601_to_epoch(e.last_run.as_deref()),
+            actor: actor.map(ToString::to_string),
+            action: Action::Executed,
+            subject: Subject::Command(e.program.clone()),
+            source: SourceKind::Registry,
+            detail: format!(
+                "UserAssist: {} run {} time(s)",
+                e.program, e.run_count
+            ),
+        })
+        .collect()
+}
+
+/// Normalize IE/Edge TypedURLs into [`Action::Typed`] [`UserActivity`] events.
+///
+/// Each typed URL → a `Typed` activity carrying the URL as a [`Subject::Query`]
+/// (an address-bar entry is a typed lookup); the companion `TypedURLsTime`
+/// timestamp parsed to epoch.
+#[must_use]
+pub fn from_typed_urls(
+    urls: &[winreg_artifacts::typed_urls::TypedUrl],
+    actor: Option<&str>,
+) -> Vec<UserActivity> {
+    urls.iter()
+        .map(|u| {
+            let detail = match &u.suspicious_reason {
+                Some(reason) => format!("TypedURL: {} ({reason})", u.url),
+                None => format!("TypedURL: {}", u.url),
+            };
+            UserActivity {
+                timestamp: iso8601_to_epoch(u.last_visited.as_deref()),
+                actor: actor.map(ToString::to_string),
+                action: Action::Typed,
+                subject: Subject::Query(u.url.clone()),
+                source: SourceKind::Registry,
+                detail,
+            }
+        })
+        .collect()
+}
+
+/// Normalize ShellBags into [`Action::Accessed`] folder [`UserActivity`] events.
+///
+/// Each BagMRU entry → an `Accessed` activity whose [`Subject::Folder`] is the
+/// reconstructed folder path; the key's `LastWriteTime` parsed to epoch.
+#[must_use]
+pub fn from_shellbags(
+    bags: &[winreg_artifacts::shellbags::ShellbagEntry],
+    actor: Option<&str>,
+) -> Vec<UserActivity> {
+    bags.iter()
+        .map(|b| UserActivity {
+            timestamp: iso8601_to_epoch(b.last_written.as_deref()),
+            actor: actor.map(ToString::to_string),
+            action: Action::Accessed,
+            subject: Subject::folder(b.path.clone()),
+            source: SourceKind::Registry,
+            detail: format!("ShellBag {}: {}", b.key_path, b.path),
+        })
+        .collect()
+}
+
+/// Normalize all three per-user registry artifacts into one [`UserActivity`] stream.
+///
+/// Concatenates [`from_userassist`], [`from_typed_urls`], and [`from_shellbags`],
+/// attributing every event to the hive owner when known.
+#[must_use]
+pub fn from_registry(
+    userassist: &[winreg_artifacts::userassist::UserAssistEntry],
+    typed_urls: &[winreg_artifacts::typed_urls::TypedUrl],
+    shellbags: &[winreg_artifacts::shellbags::ShellbagEntry],
+    actor: Option<&str>,
+) -> Vec<UserActivity> {
+    let mut acts = from_userassist(userassist, actor);
+    acts.extend(from_typed_urls(typed_urls, actor));
+    acts.extend(from_shellbags(shellbags, actor));
+    acts
+}
+
 /// Merge any number of [`ActivitySource`]s into one timeline, sorted by timestamp.
 ///
 /// Events with a timestamp come first in ascending epoch order; `None`-timestamp
