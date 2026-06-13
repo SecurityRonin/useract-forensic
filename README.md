@@ -61,8 +61,9 @@ A new source is one `impl ActivitySource { fn activities(&self) -> Vec<UserActiv
 | Per-user app exec + network bytes **by SID** | [`srum-parser`](https://crates.io/crates/srum-parser) / [`srum-core`](https://crates.io/crates/srum-core) | `Executed` (actor!) | ✅ v0.2 |
 | UserAssist / TypedURLs / ShellBags | [`winreg-artifacts`](https://crates.io/crates/winreg-artifacts) | `Executed` / `Typed` / `Accessed` | ✅ v0.2 |
 | Recent-file LNK (the volume serial that completes the device join) | [`lnk-core`](https://crates.io/crates/lnk-core) | `Accessed` (File + serial) | ✅ v0.2 |
+| Jump Lists — per-app recent/pinned items (`DestList` MRU access time + origin host) | [`lnk-core`](https://crates.io/crates/lnk-core) | `Accessed` (File + serial) | ✅ v0.3 |
 
-SRUM is the strongest — the first source that attributes activity to a specific **SID**, resolving the SRUM integer foreign keys through the `SruDbIdMapTable`. The next sources (ShellBags via `winreg-artifacts` + a ShellItem decoder, JumpLists via `lnk` v0.2) land in v0.3. See [`docs/roadmap.md`](docs/roadmap.md).
+SRUM is the strongest — the first source that attributes activity to a specific **SID**, resolving the SRUM integer foreign keys through the `SruDbIdMapTable`. ShellBags now decode to real folder names (via `winreg-artifacts` + the `shellitem` primitive) and Jump Lists join in as a recent-items source (`lnk-core` 0.3). See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## The anomaly codes
 

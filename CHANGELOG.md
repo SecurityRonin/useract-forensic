@@ -6,6 +6,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [useract-forensic 0.3.0] — 2026-06-13
+
+### Added
+
+- **Jump List ActivitySource** (`JumpListSource` / `from_jumplists`). Parsed
+  `lnk-core` Jump Lists (`*.automaticDestinations-ms` /
+  `*.customDestinations-ms`) become `Accessed` file events. The `DestList`
+  last-access time is the authoritative timestamp (falling back to the embedded
+  link's write time for custom destinations), and the embedded link's `VolumeID`
+  drive serial is carried as the device-join key. New `SourceKind::JumpList`.
+
+### Changed
+
+- ShellBag activity now carries **real folder names** (via `winreg-artifacts`
+  0.1.1, which decodes BagMRU slots through the `shellitem` primitive) instead of
+  opaque size previews.
+- Bumped the `lnk-core` dependency to 0.3 (Jump List types + `shellitem`-decoded
+  `LinkTargetIDList`).
+
 ## [useract-forensic 0.2.0] — 2026-06-13
 
 ### Added — three new actor-rich sources

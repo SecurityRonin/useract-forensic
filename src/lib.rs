@@ -136,6 +136,10 @@ pub enum SourceKind {
     /// `lnk-core` — Windows Shell Link (`.lnk`) targets, carrying the volume
     /// serial that completes the device join.
     LnkFile,
+    /// `lnk-core` Jump Lists (`*.automaticDestinations-ms` /
+    /// `*.customDestinations-ms`) — per-application recent/pinned items, with the
+    /// `DestList` MRU last-access time and origin host.
+    JumpList,
 }
 
 /// One normalized user-activity event: *who* did *what*, *when*, to *which* subject.
@@ -472,6 +476,100 @@ pub fn from_lnk(links: &[lnk_core::ShellLink], actor: Option<&str>) -> Vec<UserA
             })
         })
         .collect()
+}
+
+/// A [`JumpListSource`] wraps parsed `lnk-core` Jump Lists — the per-application
+/// MRU of recently opened (and pinned) items. Automatic destinations carry a
+/// `DestList` with the authoritative per-target access time and origin host;
+/// custom destinations are a flat list of embedded shell links.
+pub struct JumpListSource<'a> {
+    lists: &'a [lnk_core::JumpList],
+    actor: Option<String>,
+}
+
+impl<'a> JumpListSource<'a> {
+    /// Wrap parsed Jump Lists, attributing them to a user when known.
+    #[must_use]
+    pub fn new(lists: &'a [lnk_core::JumpList], actor: Option<&str>) -> Self {
+        Self {
+            lists,
+            actor: actor.map(ToString::to_string),
+        }
+    }
+}
+
+impl ActivitySource for JumpListSource<'_> {
+    fn activities(&self) -> Vec<UserActivity> {
+        from_jumplists(self.lists, self.actor.as_deref())
+    }
+}
+
+/// Normalize parsed Jump Lists into [`Action::Accessed`] file [`UserActivity`]s.
+///
+/// Each entry yields one event. The target path and access time prefer the
+/// `DestList` record (the authoritative MRU metadata of an automatic-destinations
+/// list); when there is no `DestList` (a custom-destinations entry) the embedded
+/// shell link supplies them, exactly as a loose `.lnk` does via [`from_lnk`]. The
+/// embedded link's `VolumeID` drive serial is carried on the [`Subject::File`] as
+/// the device-join key. An entry with no resolvable target path is skipped rather
+/// than emitting a pathless event.
+#[must_use]
+pub fn from_jumplists(lists: &[lnk_core::JumpList], actor: Option<&str>) -> Vec<UserActivity> {
+    let mut out = Vec::new();
+    for list in lists {
+        let app = list.app_id.as_deref().map_or_else(
+            || "unknown app".to_string(),
+            |id| {
+                forensicnomicon::jumplist::appid_name(id)
+                    .map_or_else(|| format!("AppID {id}"), ToString::to_string)
+            },
+        );
+        for entry in &list.entries {
+            let info = entry.link.link_info.as_ref();
+            let link_path = info.and_then(|i| {
+                i.local_base_path.clone().or_else(|| {
+                    i.common_network_relative_link
+                        .as_ref()
+                        .and_then(|c| c.net_name.clone())
+                })
+            });
+            // Prefer the DestList-recorded target; fall back to the embedded link.
+            let path = match entry.destlist.as_ref() {
+                Some(d) if !d.path.is_empty() => Some(d.path.clone()),
+                _ => link_path,
+            };
+            let Some(path) = path else { continue };
+
+            let volume_serial =
+                info.and_then(|i| i.volume_id.as_ref().map(|v| v.drive_serial_number));
+            // DestList last-access is authoritative; else the link write_time. Both
+            // use 0 as the "not set" sentinel.
+            let dl_ts = entry
+                .destlist
+                .as_ref()
+                .and_then(|d| (d.last_access != 0).then_some(d.last_access));
+            let timestamp = dl_ts.or_else(|| {
+                (entry.link.header.write_time != 0).then_some(entry.link.header.write_time)
+            });
+
+            let detail = match entry.destlist.as_ref() {
+                Some(d) => format!("JumpList ({app}) recent item on {}: {path}", d.hostname),
+                None => format!("JumpList ({app}) recent item: {path}"),
+            };
+            out.push(UserActivity {
+                timestamp,
+                actor: actor.map(ToString::to_string),
+                action: Action::Accessed,
+                subject: Subject::File {
+                    path,
+                    volume_serial,
+                },
+                source: SourceKind::JumpList,
+                detail,
+            });
+        }
+    }
+    out
 }
 
 /// Parse an ISO-8601 `%Y-%m-%dT%H:%M:%SZ` UTC timestamp (the form
@@ -1713,7 +1811,12 @@ mod tests {
         // An automatic-destinations entry: the DestList records the target path,
         // the MRU last-access time, and the origin host; the embedded link carries
         // the volume serial (the device join key).
-        let link = shell_link(Some("C:\\Users\\bob\\q3.xlsx"), Some(0x1234_5678), 1_700_000_000, None);
+        let link = shell_link(
+            Some("C:\\Users\\bob\\q3.xlsx"),
+            Some(0x1234_5678),
+            1_700_000_000,
+            None,
+        );
         let lists = [lnk_core::JumpList {
             kind: lnk_core::JumpListKind::Automatic,
             app_id: Some("1b4dd67f29cb1962".to_string()),
@@ -1744,11 +1847,19 @@ mod tests {
     fn jumplist_custom_entry_falls_back_to_embedded_link() {
         // A custom-destinations entry has no DestList: the path and timestamp come
         // from the embedded shell link, exactly like a loose .lnk.
-        let link = shell_link(Some("D:\\report.pdf"), Some(0xAABB_CCDD), 1_690_000_000, None);
+        let link = shell_link(
+            Some("D:\\report.pdf"),
+            Some(0xAABB_CCDD),
+            1_690_000_000,
+            None,
+        );
         let lists = [lnk_core::JumpList {
             kind: lnk_core::JumpListKind::Custom,
             app_id: None,
-            entries: vec![lnk_core::JumpListEntry { destlist: None, link }],
+            entries: vec![lnk_core::JumpListEntry {
+                destlist: None,
+                link,
+            }],
         }];
         let acts = from_jumplists(&lists, None);
         assert_eq!(acts.len(), 1);
