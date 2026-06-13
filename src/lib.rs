@@ -190,9 +190,25 @@ impl ActivitySource for ShellHistorySource<'_> {
 /// [`Action::HistoryTampered`]. The `actor` (when known) is carried onto every
 /// event.
 #[must_use]
-pub fn from_shell_history(_entries: &[HistoryEntry], _actor: Option<&str>) -> Vec<UserActivity> {
-    // RED stub — implementation follows in the GREEN commit.
-    Vec::new()
+pub fn from_shell_history(entries: &[HistoryEntry], actor: Option<&str>) -> Vec<UserActivity> {
+    entries
+        .iter()
+        .map(|e| {
+            let action = if is_history_tamper(&e.command) {
+                Action::HistoryTampered
+            } else {
+                Action::Executed
+            };
+            UserActivity {
+                timestamp: e.timestamp,
+                actor: actor.map(ToString::to_string),
+                action,
+                subject: Subject::Command(e.command.clone()),
+                source: SourceKind::ShellHistory,
+                detail: e.command.clone(),
+            }
+        })
+        .collect()
 }
 
 /// A [`DeviceSource`] wraps a borrowed slice of decoded device connections.
@@ -224,9 +240,28 @@ impl ActivitySource for DeviceSource<'_> {
 /// serial. The timestamp is the device's first-install/first-seen stamp when the
 /// source recorded one.
 #[must_use]
-pub fn from_device_connections(_connections: &[DeviceConnection]) -> Vec<UserActivity> {
-    // RED stub — implementation follows in the GREEN commit.
-    Vec::new()
+pub fn from_device_connections(connections: &[DeviceConnection]) -> Vec<UserActivity> {
+    connections
+        .iter()
+        .map(|c| {
+            let timestamp = c
+                .first_install
+                .or(c.last_arrival)
+                .or(c.last_install)
+                .map(|s| s.value);
+            UserActivity {
+                timestamp,
+                actor: None,
+                action: Action::Connected,
+                subject: Subject::Device {
+                    id: c.device_instance_id.clone(),
+                    volume_serial: c.volume_serial,
+                },
+                source: SourceKind::PeripheralDevice,
+                detail: c.device_instance_id.clone(),
+            }
+        })
+        .collect()
 }
 
 /// Merge any number of [`ActivitySource`]s into one timeline, sorted by timestamp.
@@ -235,9 +270,12 @@ pub fn from_device_connections(_connections: &[DeviceConnection]) -> Vec<UserAct
 /// events are kept (their order is forensically meaningful too) and ordered stably
 /// at the end, preserving source/insertion order among themselves.
 #[must_use]
-pub fn build_timeline(_sources: &[&dyn ActivitySource]) -> Vec<UserActivity> {
-    // RED stub — implementation follows in the GREEN commit.
-    Vec::new()
+pub fn build_timeline(sources: &[&dyn ActivitySource]) -> Vec<UserActivity> {
+    let mut events: Vec<UserActivity> = sources.iter().flat_map(|s| s.activities()).collect();
+    // Stable sort keeps None-timestamp events in source order; the key puts
+    // timestamped events first (ascending), untimestamped last.
+    events.sort_by_key(|e| (e.timestamp.is_none(), e.timestamp.unwrap_or(i64::MAX)));
+    events
 }
 
 /// The default temporal window (seconds) for the exec-during-removable-media join.
@@ -272,9 +310,24 @@ pub fn source(scope: impl Into<String>) -> Source {
 /// v0.1 file sources do not exist yet, so this is exercised by a synthetic event in
 /// tests to prove the join is correct by construction.
 #[must_use]
-pub fn device_file_volume_joins(_events: &[UserActivity]) -> Vec<(usize, usize)> {
-    // RED stub — implementation follows in the GREEN commit.
-    Vec::new()
+pub fn device_file_volume_joins(events: &[UserActivity]) -> Vec<(usize, usize)> {
+    let mut pairs = Vec::new();
+    for (di, dev) in events.iter().enumerate() {
+        let Subject::Device {
+            volume_serial: Some(dev_serial),
+            ..
+        } = &dev.subject
+        else {
+            continue;
+        };
+        for (fi, file) in events.iter().enumerate() {
+            let is_file = matches!(file.subject, Subject::File(_) | Subject::Folder(_));
+            if is_file && file_volume_serial(file) == Some(*dev_serial) {
+                pairs.push((di, fi));
+            }
+        }
+    }
+    pairs
 }
 
 /// Extract the `vol:<serial>` volume-serial hint a file/folder activity advertises,
@@ -309,13 +362,7 @@ pub fn audit(events: &[UserActivity]) -> Vec<Finding> {
 
 /// [`audit`] with a caller-supplied [`Source`] stamp (scope/version).
 #[must_use]
-pub fn audit_with(_events: &[UserActivity], _src: &Source) -> Vec<Finding> {
-    // RED stub — implementation follows in the GREEN commit.
-    Vec::new()
-}
-
-#[allow(dead_code)]
-fn audit_with_impl(events: &[UserActivity], src: &Source) -> Vec<Finding> {
+pub fn audit_with(events: &[UserActivity], src: &Source) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     // Removable mass-storage connection windows: (epoch, device id).
@@ -343,14 +390,14 @@ fn audit_with_impl(events: &[UserActivity], src: &Source) -> Vec<Finding> {
         }
 
         // USERACT-EXEC-DURING-REMOVABLE-MEDIA — temporal cross-source join.
-        if event.action == Action::Executed {
-            if let (Some(ts), Subject::Command(cmd)) = (event.timestamp, &event.subject) {
-                if let Some((win_ts, dev_id)) = media_windows
-                    .iter()
-                    .find(|(dev_ts, _)| (ts - dev_ts).abs() <= REMOVABLE_MEDIA_WINDOW_SECS)
-                {
-                    findings.push(exec_during_media_finding(cmd, ts, *win_ts, dev_id, src));
-                }
+        if let (Action::Executed, Some(ts), Subject::Command(cmd)) =
+            (event.action, event.timestamp, &event.subject)
+        {
+            if let Some((win_ts, dev_id)) = media_windows
+                .iter()
+                .find(|(dev_ts, _)| (ts - dev_ts).abs() <= REMOVABLE_MEDIA_WINDOW_SECS)
+            {
+                findings.push(exec_during_media_finding(cmd, ts, *win_ts, dev_id, src));
             }
         }
     }
@@ -373,15 +420,19 @@ fn history_tampered_finding(event: &UserActivity, src: &Source) -> Finding {
         Subject::Command(c) => c.as_str(),
         _ => event.detail.as_str(),
     };
-    Finding::observation(Severity::Medium, Category::Concealment, "USERACT-HISTORY-TAMPERED")
-        .source(src.clone())
-        .note(format!(
-            "user activity {cmd:?} disables or clears the activity record; consistent with \
+    Finding::observation(
+        Severity::Medium,
+        Category::Concealment,
+        "USERACT-HISTORY-TAMPERED",
+    )
+    .source(src.clone())
+    .note(format!(
+        "user activity {cmd:?} disables or clears the activity record; consistent with \
              anti-forensic history tampering (MITRE T1070.003)"
-        ))
-        .evidence("command", cmd.to_string())
-        .external_ref(ExternalRef::mitre_attack("T1070.003"))
-        .build()
+    ))
+    .evidence("command", cmd.to_string())
+    .external_ref(ExternalRef::mitre_attack("T1070.003"))
+    .build()
 }
 
 fn exec_during_media_finding(
@@ -427,7 +478,12 @@ mod tests {
         }
     }
 
-    fn device(instance_id: &str, bus: Bus, first_install: Option<i64>, vol: Option<u32>) -> DeviceConnection {
+    fn device(
+        instance_id: &str,
+        bus: Bus,
+        first_install: Option<i64>,
+        vol: Option<u32>,
+    ) -> DeviceConnection {
         DeviceConnection {
             bus,
             device_class_guid: None,
@@ -485,9 +541,9 @@ mod tests {
             "Clear-History",
             "rm ~/.bash_history",
         ] {
-            let entries = [entry(cmd, Some(1)) ];
+            let entries = [entry(cmd, Some(1))];
             let acts = from_shell_history(&entries, None);
-            assert_eq!(acts[0].action, Action::HistoryTampered, "{cmd:?} should be tamper");
+            assert_eq!(acts[0].action, Action::HistoryTampered);
         }
     }
 
@@ -513,13 +569,13 @@ mod tests {
         assert_eq!(acts[0].action, Action::Connected);
         assert_eq!(acts[0].source, SourceKind::PeripheralDevice);
         assert_eq!(acts[0].timestamp, Some(1_700_000_500));
-        match &acts[0].subject {
-            Subject::Device { id, volume_serial } => {
-                assert_eq!(id, "USBSTOR\\Disk&Ven_SanDisk\\1234567890AB");
-                assert_eq!(*volume_serial, Some(0xDEAD_BEEF));
+        assert_eq!(
+            acts[0].subject,
+            Subject::Device {
+                id: "USBSTOR\\Disk&Ven_SanDisk\\1234567890AB".to_string(),
+                volume_serial: Some(0xDEAD_BEEF),
             }
-            other => panic!("expected Device subject, got {other:?}"),
-        }
+        );
     }
 
     #[test]
@@ -552,7 +608,11 @@ mod tests {
 
     #[test]
     fn timeline_orders_untimestamped_events_last_and_stably() {
-        let entries = [entry("no_ts_a", None), entry("ts", Some(50)), entry("no_ts_b", None)];
+        let entries = [
+            entry("no_ts_a", None),
+            entry("ts", Some(50)),
+            entry("no_ts_b", None),
+        ];
         let shell = ShellHistorySource::new(&entries);
         let tl = build_timeline(&[&shell]);
         assert_eq!(tl[0].timestamp, Some(50));
@@ -567,12 +627,10 @@ mod tests {
         let entries = [entry("unset HISTFILE", Some(10))];
         let acts = from_shell_history(&entries, None);
         let findings = audit(&acts);
-        assert!(
-            findings.iter().any(|f| f.code == "USERACT-HISTORY-TAMPERED"),
-            "got {:?}",
-            findings.iter().map(|f| f.code.as_ref()).collect::<Vec<_>>()
-        );
-        let f = findings.iter().find(|f| f.code == "USERACT-HISTORY-TAMPERED").unwrap();
+        let f = findings
+            .iter()
+            .find(|f| f.code == "USERACT-HISTORY-TAMPERED")
+            .expect("history-tampered finding must fire");
         assert_eq!(f.severity, Some(Severity::Medium));
         assert_eq!(f.category, Category::Concealment);
     }
@@ -587,22 +645,27 @@ mod tests {
         let devices = DeviceSource::new(&conns);
         let tl = build_timeline(&[&shell, &devices]);
         let findings = audit(&tl);
-        assert!(
-            findings.iter().any(|f| f.code == "USERACT-EXEC-DURING-REMOVABLE-MEDIA"),
-            "got {:?}",
-            findings.iter().map(|f| f.code.as_ref()).collect::<Vec<_>>()
-        );
+        assert!(findings
+            .iter()
+            .any(|f| f.code == "USERACT-EXEC-DURING-REMOVABLE-MEDIA"));
     }
 
     #[test]
     fn audit_does_not_fire_outside_window() {
         let entries = [entry("ls", Some(1_000))];
-        let conns = [device("USBSTOR\\Disk", Bus::Usb, Some(1_000 + REMOVABLE_MEDIA_WINDOW_SECS + 1), None)];
+        let conns = [device(
+            "USBSTOR\\Disk",
+            Bus::Usb,
+            Some(1_000 + REMOVABLE_MEDIA_WINDOW_SECS + 1),
+            None,
+        )];
         let shell = ShellHistorySource::new(&entries);
         let devices = DeviceSource::new(&conns);
         let tl = build_timeline(&[&shell, &devices]);
         let findings = audit(&tl);
-        assert!(findings.iter().all(|f| f.code != "USERACT-EXEC-DURING-REMOVABLE-MEDIA"));
+        assert!(findings
+            .iter()
+            .all(|f| f.code != "USERACT-EXEC-DURING-REMOVABLE-MEDIA"));
     }
 
     #[test]
@@ -614,7 +677,9 @@ mod tests {
         let devices = DeviceSource::new(&conns);
         let tl = build_timeline(&[&shell, &devices]);
         let findings = audit(&tl);
-        assert!(findings.iter().all(|f| f.code != "USERACT-EXEC-DURING-REMOVABLE-MEDIA"));
+        assert!(findings
+            .iter()
+            .all(|f| f.code != "USERACT-EXEC-DURING-REMOVABLE-MEDIA"));
     }
 
     #[test]
@@ -631,7 +696,10 @@ mod tests {
 
     #[test]
     fn findings_are_hedged_observations_never_verdicts() {
-        let entries = [entry("unset HISTFILE", Some(1_000)), entry("cp x /media/usb", Some(1_010))];
+        let entries = [
+            entry("unset HISTFILE", Some(1_000)),
+            entry("cp x /media/usb", Some(1_010)),
+        ];
         let conns = [device("USBSTOR\\Disk", Bus::Usb, Some(1_005), None)];
         let shell = ShellHistorySource::new(&entries);
         let devices = DeviceSource::new(&conns);
@@ -640,12 +708,10 @@ mod tests {
         assert!(!findings.is_empty());
         for f in &findings {
             let note = f.note.to_ascii_lowercase();
-            assert!(
-                !note.contains("proves") && !note.contains("confirms") && !note.contains("definitely"),
-                "verdict language in note: {}",
-                f.note
-            );
-            assert!(note.contains("consistent with"), "note must hedge: {}", f.note);
+            assert!(!note.contains("proves"));
+            assert!(!note.contains("confirms"));
+            assert!(!note.contains("definitely"));
+            assert!(note.contains("consistent with"));
         }
     }
 
@@ -674,7 +740,7 @@ mod tests {
             detail: "opened E:\\secret.docx vol:4660".to_string(), // 0x1234 == 4660
         });
         let joins = device_file_volume_joins(&acts);
-        assert_eq!(joins, vec![(0, 1)], "device 0 should join to file 1 on volume serial");
+        assert_eq!(joins, vec![(0, 1)]);
     }
 
     #[test]
@@ -690,6 +756,52 @@ mod tests {
             detail: "vol:9999".to_string(),
         });
         assert!(device_file_volume_joins(&acts).is_empty());
+    }
+
+    #[test]
+    fn volume_serial_join_skips_files_without_a_volume_token() {
+        // A folder activity that advertises no `vol:` token never joins (the
+        // file_volume_serial None path).
+        let conns = [device("USBSTOR\\Disk", Bus::Usb, Some(1), Some(0x1234))];
+        let mut acts = from_device_connections(&conns);
+        acts.push(UserActivity {
+            timestamp: Some(2),
+            actor: None,
+            action: Action::Accessed,
+            subject: Subject::Folder("E:\\photos".to_string()),
+            source: SourceKind::PeripheralDevice,
+            detail: "opened folder with no serial hint".to_string(),
+        });
+        // And a file whose `vol:` token is non-numeric (parse Err path) also never joins.
+        acts.push(UserActivity {
+            timestamp: Some(3),
+            actor: None,
+            action: Action::Accessed,
+            subject: Subject::File("E:\\x".to_string()),
+            source: SourceKind::PeripheralDevice,
+            detail: "vol:notanumber".to_string(),
+        });
+        assert!(device_file_volume_joins(&acts).is_empty());
+    }
+
+    #[test]
+    fn history_tampered_finding_falls_back_to_detail_for_non_command_subject() {
+        // Defensive: a HistoryTampered activity whose subject is not a Command still
+        // produces a finding, using detail for the command text.
+        let act = UserActivity {
+            timestamp: Some(1),
+            actor: None,
+            action: Action::HistoryTampered,
+            subject: Subject::File("ConsoleHost_history.txt".to_string()),
+            source: SourceKind::ShellHistory,
+            detail: "Remove-Item ConsoleHost_history.txt".to_string(),
+        };
+        let findings = audit(&[act]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "USERACT-HISTORY-TAMPERED");
+        assert!(findings[0]
+            .note
+            .contains("Remove-Item ConsoleHost_history.txt"));
     }
 
     #[test]

