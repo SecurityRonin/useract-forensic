@@ -405,6 +405,72 @@ pub fn from_srum(
     acts
 }
 
+/// A [`LnkSource`] wraps borrowed Windows Shell Link targets parsed by `lnk-core`.
+///
+/// Each [`ShellLink`](lnk_core::ShellLink) → an [`Action::Accessed`]
+/// [`Subject::File`] whose path is the link's local base path (or the network
+/// target's UNC name) and whose `volume_serial` is the `VolumeID`
+/// `DriveSerialNumber` — the structured key that completes the device join. The
+/// target's last-write FILETIME becomes the activity timestamp.
+pub struct LnkSource<'a> {
+    links: &'a [lnk_core::ShellLink],
+    actor: Option<String>,
+}
+
+impl<'a> LnkSource<'a> {
+    /// Wrap parsed shell links, attributing them to a user when known.
+    #[must_use]
+    pub fn new(links: &'a [lnk_core::ShellLink], actor: Option<&str>) -> Self {
+        Self {
+            links,
+            actor: actor.map(ToString::to_string),
+        }
+    }
+}
+
+impl ActivitySource for LnkSource<'_> {
+    fn activities(&self) -> Vec<UserActivity> {
+        from_lnk(self.links, self.actor.as_deref())
+    }
+}
+
+/// Normalize parsed Shell Links into [`Action::Accessed`] file [`UserActivity`]s.
+///
+/// Each link's target path comes from `link_info.local_base_path`; when that is
+/// absent, the `CommonNetworkRelativeLink` net name (a UNC share) is used. A link
+/// with no `LinkInfo` and no resolvable target is skipped rather than emitting a
+/// pathless event. The target's `write_time` FILETIME (already Unix epoch seconds,
+/// 0 = unset) becomes the timestamp; the `VolumeID` drive serial is carried on the
+/// [`Subject::File`] as the device-join key.
+#[must_use]
+pub fn from_lnk(links: &[lnk_core::ShellLink], actor: Option<&str>) -> Vec<UserActivity> {
+    links
+        .iter()
+        .filter_map(|link| {
+            let info = link.link_info.as_ref()?;
+            let path = info.local_base_path.clone().or_else(|| {
+                info.common_network_relative_link
+                    .as_ref()
+                    .and_then(|c| c.net_name.clone())
+            })?;
+            let volume_serial = info.volume_id.as_ref().map(|v| v.drive_serial_number);
+            // lnk-core already maps a zero "not set" FILETIME to 0 epoch seconds.
+            let timestamp = (link.header.write_time != 0).then_some(link.header.write_time);
+            Some(UserActivity {
+                timestamp,
+                actor: actor.map(ToString::to_string),
+                action: Action::Accessed,
+                subject: Subject::File {
+                    path: path.clone(),
+                    volume_serial,
+                },
+                source: SourceKind::LnkFile,
+                detail: format!("LNK target: {path}"),
+            })
+        })
+        .collect()
+}
+
 /// Parse an ISO-8601 `%Y-%m-%dT%H:%M:%SZ` UTC timestamp (the form
 /// `winreg-artifacts` emits) into Unix epoch seconds. Returns [`None`] for an
 /// absent or unparseable value — a missing timestamp is forensically meaningful,
