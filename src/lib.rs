@@ -64,11 +64,25 @@ pub enum Action {
 pub enum Subject {
     /// A shell command or program invocation.
     Command(String),
-    /// A file path.
-    File(String),
-    /// A folder path.
-    Folder(String),
-    /// An external device, with its volume serial kept distinct so a future LNK /
+    /// A file path, carrying the **volume serial** of the volume it lives on when
+    /// the source knows it (LNK `VolumeID`). The serial is the join key to a
+    /// [`Subject::Device`] with the same volume serial (see
+    /// [`device_file_volume_joins`]).
+    File {
+        /// The file path.
+        path: String,
+        /// NTFS/FAT volume serial of the file's volume, when known.
+        volume_serial: Option<u32>,
+    },
+    /// A folder path, carrying the **volume serial** of the volume it lives on when
+    /// the source knows it (shellbag / LNK directory target).
+    Folder {
+        /// The folder path.
+        path: String,
+        /// NTFS/FAT volume serial of the folder's volume, when known.
+        volume_serial: Option<u32>,
+    },
+    /// An external device, with its volume serial kept distinct so an LNK /
     /// shellbag [`Subject::File`] carrying the same NTFS/FAT volume serial can be
     /// joined to it (see [`device_file_volume_joins`]).
     Device {
@@ -81,10 +95,29 @@ pub enum Subject {
     Query(String),
 }
 
+impl Subject {
+    /// A file path with no known volume serial.
+    #[must_use]
+    pub fn file(path: impl Into<String>) -> Self {
+        Self::File {
+            path: path.into(),
+            volume_serial: None,
+        }
+    }
+
+    /// A folder path with no known volume serial.
+    #[must_use]
+    pub fn folder(path: impl Into<String>) -> Self {
+        Self::Folder {
+            path: path.into(),
+            volume_serial: None,
+        }
+    }
+}
+
 /// Which reader the activity was normalized from.
 ///
-/// Extensible: v0.2 adds `LnkFile`, `Shellbag`, `Srum`, `Registry` as new readers
-/// are published. Marked `#[non_exhaustive]` so adding a variant is non-breaking;
+/// Extensible: marked `#[non_exhaustive]` so adding a variant is non-breaking;
 /// consumers must use a `_` arm when matching.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -93,6 +126,15 @@ pub enum SourceKind {
     ShellHistory,
     /// `peripheral-core` — external-device connections.
     PeripheralDevice,
+    /// `srum-core` / `srum-parser` — per-user app execution and network bytes,
+    /// attributed to a user SID (the first by-SID source).
+    Srum,
+    /// `winreg-artifacts` — registry per-user artifacts (UserAssist, TypedURLs,
+    /// ShellBags).
+    Registry,
+    /// `lnk-core` — Windows Shell Link (`.lnk`) targets, carrying the volume
+    /// serial that completes the device join.
+    LnkFile,
 }
 
 /// One normalized user-activity event: *who* did *what*, *when*, to *which* subject.
@@ -264,6 +306,105 @@ pub fn from_device_connections(connections: &[DeviceConnection]) -> Vec<UserActi
         .collect()
 }
 
+/// A [`SrumSource`] wraps borrowed SRUM network-usage and app-usage records plus
+/// the `SruDbIdMapTable` that resolves their integer `user_id` / `app_id` foreign
+/// keys to user SIDs and application paths.
+///
+/// SRUM is the first source that **attributes** activity to a specific user: each
+/// row becomes an [`Action::Executed`] [`UserActivity`] whose `actor` is the
+/// resolved user SID. Network rows additionally carry the per-interval byte volume
+/// in `detail`, sharpening the exfiltration lens.
+pub struct SrumSource<'a> {
+    network: &'a [srum_core::NetworkUsageRecord],
+    app_usage: &'a [srum_core::AppUsageRecord],
+    id_map: &'a [srum_core::IdMapEntry],
+}
+
+impl<'a> SrumSource<'a> {
+    /// Wrap decoded SRUM records with the id-map needed to resolve users and apps.
+    #[must_use]
+    pub fn new(
+        network: &'a [srum_core::NetworkUsageRecord],
+        app_usage: &'a [srum_core::AppUsageRecord],
+        id_map: &'a [srum_core::IdMapEntry],
+    ) -> Self {
+        Self {
+            network,
+            app_usage,
+            id_map,
+        }
+    }
+}
+
+impl ActivitySource for SrumSource<'_> {
+    fn activities(&self) -> Vec<UserActivity> {
+        from_srum(self.network, self.app_usage, self.id_map)
+    }
+}
+
+/// Resolve a SRUM integer id to its mapped name via the `SruDbIdMapTable`.
+///
+/// Returns `None` when the id is absent from the map — the caller substitutes a
+/// stable synthetic token so the foreign key is never silently dropped.
+fn resolve_id(id: i32, id_map: &[srum_core::IdMapEntry]) -> Option<String> {
+    id_map
+        .iter()
+        .find(|e| e.id == id)
+        .map(|e| e.name.clone())
+        .filter(|n| !n.is_empty())
+}
+
+/// Normalize SRUM network-usage and app-usage records into [`UserActivity`] events.
+///
+/// Each record → [`Action::Executed`], attributed to the user SID resolved from the
+/// id-map (falling back to a `user-id:<n>` token when unresolved). The application
+/// resolves to its path (falling back to `app-id:<n>`). Network rows carry their
+/// `<bytes_sent>↑ / <bytes_recv>↓ bytes` in `detail`; app-usage rows carry their
+/// foreground/background CPU cycles. The `DateTime<Utc>` timestamp becomes Unix
+/// epoch seconds.
+#[must_use]
+pub fn from_srum(
+    network: &[srum_core::NetworkUsageRecord],
+    app_usage: &[srum_core::AppUsageRecord],
+    id_map: &[srum_core::IdMapEntry],
+) -> Vec<UserActivity> {
+    let mut acts = Vec::with_capacity(network.len() + app_usage.len());
+
+    for r in network {
+        let actor = resolve_id(r.user_id, id_map).unwrap_or_else(|| format!("user-id:{}", r.user_id));
+        let app = resolve_id(r.app_id, id_map).unwrap_or_else(|| format!("app-id:{}", r.app_id));
+        acts.push(UserActivity {
+            timestamp: Some(r.timestamp.timestamp()),
+            actor: Some(actor),
+            action: Action::Executed,
+            subject: Subject::Command(app),
+            source: SourceKind::Srum,
+            detail: format!(
+                "{}\u{2191} / {}\u{2193} bytes (SRUM network usage)",
+                r.bytes_sent, r.bytes_recv
+            ),
+        });
+    }
+
+    for r in app_usage {
+        let actor = resolve_id(r.user_id, id_map).unwrap_or_else(|| format!("user-id:{}", r.user_id));
+        let app = resolve_id(r.app_id, id_map).unwrap_or_else(|| format!("app-id:{}", r.app_id));
+        acts.push(UserActivity {
+            timestamp: Some(r.timestamp.timestamp()),
+            actor: Some(actor),
+            action: Action::Executed,
+            subject: Subject::Command(app),
+            source: SourceKind::Srum,
+            detail: format!(
+                "{} foreground / {} background CPU cycles (SRUM app usage)",
+                r.foreground_cycles, r.background_cycles
+            ),
+        });
+    }
+
+    acts
+}
+
 /// Merge any number of [`ActivitySource`]s into one timeline, sorted by timestamp.
 ///
 /// Events with a timestamp come first in ascending epoch order; `None`-timestamp
@@ -285,6 +426,16 @@ pub fn build_timeline(sources: &[&dyn ActivitySource]) -> Vec<UserActivity> {
 /// low.
 pub const REMOVABLE_MEDIA_WINDOW_SECS: i64 = 3600;
 
+/// The conservative per-interval `bytes_sent` threshold above which a SRUM network
+/// row is surfaced as a graded exfiltration **lead** (`USERACT-NETWORK-EXFIL-VOLUME`).
+///
+/// SRUM aggregates per process per ~1-hour interval. 256 MiB sent by a single
+/// process in one interval is well above routine background/telemetry traffic yet
+/// low enough to catch a deliberate bulk upload; it is a deliberately conservative
+/// lead, not a verdict — a backup client or large legitimate upload can also cross
+/// it, so the examiner adjudicates.
+pub const NETWORK_EXFIL_BYTES_THRESHOLD: u64 = 256 * 1024 * 1024;
+
 /// The [`Source`] stamp for findings this analyzer emits.
 #[must_use]
 pub fn source(scope: impl Into<String>) -> Source {
@@ -299,16 +450,14 @@ pub fn source(scope: impl Into<String>) -> Source {
 /// [`Subject::File`] / [`Subject::Folder`] activity that names the **same volume
 /// serial**.
 ///
-/// This is the v0.2 seam: today no v0.1 source emits a `File`/`Folder` subject that
-/// carries a volume serial, so the join returns nothing — but it is implemented
-/// generically over [`UserActivity`], so the moment an `lnk-core` / `shellbag-core`
-/// source contributes file activities tagged with a volume serial, the join lights
-/// up with no change here. Returns `(device_index, file_index)` pairs into `events`.
+/// Active in v0.2: a [`Subject::File`] / [`Subject::Folder`] carrying a
+/// `volume_serial` (from `lnk-core`'s `VolumeID`) joins to a [`Subject::Device`]
+/// connected with the same serial. Returns `(device_index, file_index)` pairs into
+/// `events`.
 ///
-/// A file/folder subject advertises its volume serial via the `vol:<serial>` token
-/// convention in its [`UserActivity::detail`] (the seam the v0.2 readers will use);
-/// v0.1 file sources do not exist yet, so this is exercised by a synthetic event in
-/// tests to prove the join is correct by construction.
+/// The volume serial is read first from the subject's structured `volume_serial`
+/// field; a `vol:<serial>` token in [`UserActivity::detail`] is honored as a
+/// fallback so an out-of-band source that only annotates the detail still joins.
 #[must_use]
 pub fn device_file_volume_joins(events: &[UserActivity]) -> Vec<(usize, usize)> {
     let mut pairs = Vec::new();
@@ -321,8 +470,7 @@ pub fn device_file_volume_joins(events: &[UserActivity]) -> Vec<(usize, usize)> 
             continue;
         };
         for (fi, file) in events.iter().enumerate() {
-            let is_file = matches!(file.subject, Subject::File(_) | Subject::Folder(_));
-            if is_file && file_volume_serial(file) == Some(*dev_serial) {
+            if file_volume_serial(file) == Some(*dev_serial) {
                 pairs.push((di, fi));
             }
         }
@@ -330,9 +478,17 @@ pub fn device_file_volume_joins(events: &[UserActivity]) -> Vec<(usize, usize)> 
     pairs
 }
 
-/// Extract the `vol:<serial>` volume-serial hint a file/folder activity advertises,
-/// if any. The convention the v0.2 LNK/shellbag sources will populate.
+/// Extract a file/folder activity's volume serial: the subject's structured
+/// `volume_serial` field, else a `vol:<serial>` token in its
+/// [`UserActivity::detail`]. Non-file subjects yield [`None`].
 fn file_volume_serial(activity: &UserActivity) -> Option<u32> {
+    let structured = match &activity.subject {
+        Subject::File { volume_serial, .. } | Subject::Folder { volume_serial, .. } => *volume_serial,
+        _ => return None,
+    };
+    if structured.is_some() {
+        return structured;
+    }
     for tok in activity.detail.split_whitespace() {
         if let Some(rest) = tok.strip_prefix("vol:") {
             if let Ok(serial) = rest.parse::<u32>() {
@@ -382,11 +538,27 @@ pub fn audit_with(events: &[UserActivity], src: &Source) -> Vec<Finding> {
         })
         .collect();
 
+    // USERACT-FILE-ON-EXTERNAL-DEVICE — a file/folder accessed on a volume whose
+    // serial matches a connected external device (the volume-serial join).
+    for (di, fi) in device_file_volume_joins(events) {
+        findings.push(file_on_external_device_finding(&events[di], &events[fi], src));
+    }
+
     for event in events {
         // USERACT-HISTORY-TAMPERED — re-surface the clearing signal here.
         if event.action == Action::HistoryTampered {
             findings.push(history_tampered_finding(event, src));
             continue;
+        }
+
+        // USERACT-NETWORK-EXFIL-VOLUME — a SRUM network row whose per-interval
+        // bytes_sent crosses the conservative threshold (graded lead, not a verdict).
+        if event.source == SourceKind::Srum {
+            if let Some(bytes_sent) = srum_network_bytes_sent(event) {
+                if bytes_sent >= NETWORK_EXFIL_BYTES_THRESHOLD {
+                    findings.push(network_exfil_volume_finding(event, bytes_sent, src));
+                }
+            }
         }
 
         // USERACT-EXEC-DURING-REMOVABLE-MEDIA — temporal cross-source join.
@@ -457,6 +629,79 @@ fn exec_during_media_finding(
     .evidence("device", dev_id.to_string())
     .evidence("command_epoch", cmd_ts.to_string())
     .evidence("device_epoch", dev_ts.to_string())
+    .external_ref(ExternalRef::mitre_attack("T1052"))
+    .external_ref(ExternalRef::mitre_attack("T1091"))
+    .build()
+}
+
+/// Recover the `bytes_sent` value a SRUM network-usage activity advertises in its
+/// `detail` (the `<n>\u{2191} …` prefix [`from_srum`] writes). Returns `None` for
+/// any non-network SRUM activity (e.g. an app-usage row).
+fn srum_network_bytes_sent(activity: &UserActivity) -> Option<u64> {
+    let prefix = activity.detail.split('\u{2191}').next()?;
+    prefix.trim().parse::<u64>().ok()
+}
+
+fn network_exfil_volume_finding(event: &UserActivity, bytes_sent: u64, src: &Source) -> Finding {
+    let app = match &event.subject {
+        Subject::Command(c) => c.as_str(),
+        _ => event.detail.as_str(),
+    };
+    let actor = event.actor.as_deref().unwrap_or("(unattributed)");
+    Finding::observation(
+        Severity::Medium,
+        Category::Threat,
+        "USERACT-NETWORK-EXFIL-VOLUME",
+    )
+    .source(src.clone())
+    .note(format!(
+        "SRUM records {bytes_sent} bytes sent in one interval by {app:?} attributed to user \
+         {actor:?}; the volume exceeds the {NETWORK_EXFIL_BYTES_THRESHOLD}-byte lead threshold and \
+         is consistent with bulk data exfiltration (MITRE T1048 / T1052) — a graded lead for the \
+         examiner, not a verdict"
+    ))
+    .evidence("application", app.to_string())
+    .evidence("actor", actor.to_string())
+    .evidence("bytes_sent", bytes_sent.to_string())
+    .external_ref(ExternalRef::mitre_attack("T1048"))
+    .external_ref(ExternalRef::mitre_attack("T1052"))
+    .build()
+}
+
+fn file_on_external_device_finding(
+    device: &UserActivity,
+    file: &UserActivity,
+    src: &Source,
+) -> Finding {
+    let path = match &file.subject {
+        Subject::File { path, .. } | Subject::Folder { path, .. } => path.as_str(),
+        _ => file.detail.as_str(),
+    };
+    let dev_id = match &device.subject {
+        Subject::Device { id, .. } => id.as_str(),
+        _ => device.detail.as_str(),
+    };
+    let serial = match &device.subject {
+        Subject::Device {
+            volume_serial: Some(s),
+            ..
+        } => *s,
+        _ => 0,
+    };
+    Finding::observation(
+        Severity::Medium,
+        Category::Threat,
+        "USERACT-FILE-ON-EXTERNAL-DEVICE",
+    )
+    .source(src.clone())
+    .note(format!(
+        "a user accessed {path:?} on a volume (serial {serial:#010x}) whose serial matches the \
+         connected external device {dev_id:?}; consistent with data movement to/from removable \
+         media (MITRE T1052 / T1091)"
+    ))
+    .evidence("file", path.to_string())
+    .evidence("device", dev_id.to_string())
+    .evidence("volume_serial", format!("{serial:#010x}"))
     .external_ref(ExternalRef::mitre_attack("T1052"))
     .external_ref(ExternalRef::mitre_attack("T1091"))
     .build()
@@ -735,8 +980,8 @@ mod tests {
             timestamp: Some(2),
             actor: None,
             action: Action::Accessed,
-            subject: Subject::File("\\\\?\\E:\\secret.docx".to_string()),
-            source: SourceKind::PeripheralDevice, // placeholder until LnkFile exists
+            subject: Subject::file("\\\\?\\E:\\secret.docx"),
+            source: SourceKind::PeripheralDevice, // placeholder
             detail: "opened E:\\secret.docx vol:4660".to_string(), // 0x1234 == 4660
         });
         let joins = device_file_volume_joins(&acts);
@@ -751,7 +996,7 @@ mod tests {
             timestamp: Some(2),
             actor: None,
             action: Action::Accessed,
-            subject: Subject::File("x".to_string()),
+            subject: Subject::file("x"),
             source: SourceKind::PeripheralDevice,
             detail: "vol:9999".to_string(),
         });
@@ -768,7 +1013,7 @@ mod tests {
             timestamp: Some(2),
             actor: None,
             action: Action::Accessed,
-            subject: Subject::Folder("E:\\photos".to_string()),
+            subject: Subject::folder("E:\\photos"),
             source: SourceKind::PeripheralDevice,
             detail: "opened folder with no serial hint".to_string(),
         });
@@ -777,7 +1022,7 @@ mod tests {
             timestamp: Some(3),
             actor: None,
             action: Action::Accessed,
-            subject: Subject::File("E:\\x".to_string()),
+            subject: Subject::file("E:\\x"),
             source: SourceKind::PeripheralDevice,
             detail: "vol:notanumber".to_string(),
         });
@@ -792,7 +1037,7 @@ mod tests {
             timestamp: Some(1),
             actor: None,
             action: Action::HistoryTampered,
-            subject: Subject::File("ConsoleHost_history.txt".to_string()),
+            subject: Subject::file("ConsoleHost_history.txt"),
             source: SourceKind::ShellHistory,
             detail: "Remove-Item ConsoleHost_history.txt".to_string(),
         };
