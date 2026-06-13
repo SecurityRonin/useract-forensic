@@ -1492,4 +1492,139 @@ mod tests {
         assert_eq!(acts.len(), 1);
         assert_eq!(acts[0].source, SourceKind::Registry);
     }
+
+    // ── LNK adapter (v0.2) ────────────────────────────────────────────────────
+
+    use lnk_core::{LinkInfo, ShellLink, ShellLinkHeader, StringData, VolumeId};
+
+    fn shell_link(
+        local_base_path: Option<&str>,
+        drive_serial: Option<u32>,
+        write_time: i64,
+        net_name: Option<&str>,
+    ) -> ShellLink {
+        let volume_id = drive_serial.map(|s| VolumeId {
+            drive_type: lnk_core::drive_type::REMOVABLE,
+            drive_serial_number: s,
+            volume_label: None,
+        });
+        let cnrl = net_name.map(|n| lnk_core::CommonNetworkRelativeLink {
+            net_name: Some(n.to_string()),
+            device_name: None,
+        });
+        ShellLink {
+            header: ShellLinkHeader {
+                link_flags: 0,
+                file_attributes: 0,
+                creation_time: 0,
+                access_time: 0,
+                write_time,
+                file_size: 0,
+                icon_index: 0,
+                show_command: 1,
+                hotkey: 0,
+            },
+            link_target_idlist: None,
+            link_info: Some(LinkInfo {
+                volume_id,
+                local_base_path: local_base_path.map(ToString::to_string),
+                common_network_relative_link: cnrl,
+            }),
+            string_data: StringData::default(),
+            tracker: None,
+        }
+    }
+
+    #[test]
+    fn lnk_target_becomes_accessed_file_with_volume_serial() {
+        let links = [shell_link(
+            Some("E:\\secret.docx"),
+            Some(0xDEAD_BEEF),
+            1_700_000_000,
+            None,
+        )];
+        let acts = from_lnk(&links, Some("alice"));
+        assert_eq!(acts.len(), 1);
+        let a = &acts[0];
+        assert_eq!(a.action, Action::Accessed);
+        assert_eq!(a.source, SourceKind::LnkFile);
+        // The target write time becomes the activity timestamp.
+        assert_eq!(a.timestamp, Some(1_700_000_000));
+        assert_eq!(a.actor.as_deref(), Some("alice"));
+        // The File subject carries the structured volume serial (the join key).
+        assert_eq!(
+            a.subject,
+            Subject::File {
+                path: "E:\\secret.docx".to_string(),
+                volume_serial: Some(0xDEAD_BEEF),
+            }
+        );
+    }
+
+    #[test]
+    fn lnk_without_volume_id_has_no_serial() {
+        let links = [shell_link(Some("C:\\x.txt"), None, 0, None)];
+        let acts = from_lnk(&links, None);
+        assert_eq!(acts.len(), 1);
+        assert_eq!(
+            acts[0].subject,
+            Subject::File {
+                path: "C:\\x.txt".to_string(),
+                volume_serial: None,
+            }
+        );
+        // write_time 0 (the FILETIME "not set" sentinel) → no timestamp.
+        assert_eq!(acts[0].timestamp, None);
+    }
+
+    #[test]
+    fn lnk_network_target_falls_back_to_unc_path() {
+        // No local_base_path, but a CommonNetworkRelativeLink net name → use it.
+        let links = [shell_link(None, None, 5, Some("\\\\server\\share"))];
+        let acts = from_lnk(&links, None);
+        assert_eq!(acts.len(), 1);
+        assert_eq!(
+            acts[0].subject,
+            Subject::File {
+                path: "\\\\server\\share".to_string(),
+                volume_serial: None,
+            }
+        );
+    }
+
+    #[test]
+    fn lnk_without_link_info_is_skipped() {
+        // A link with no LinkInfo and no usable target is dropped, not crashed.
+        let mut link = shell_link(None, None, 0, None);
+        link.link_info = None;
+        let acts = from_lnk(&[link], None);
+        assert!(acts.is_empty());
+    }
+
+    #[test]
+    fn lnk_source_adapter_dispatches() {
+        let links = [shell_link(Some("E:\\f"), Some(1), 1, None)];
+        let s = LnkSource::new(&links, None);
+        let acts = s.activities();
+        assert_eq!(acts.len(), 1);
+        assert_eq!(acts[0].source, SourceKind::LnkFile);
+    }
+
+    // ── The volume-serial join activates end-to-end (LNK File ⋈ Device) ───────
+
+    #[test]
+    fn lnk_file_joins_connected_device_on_volume_serial() {
+        let links = [shell_link(Some("E:\\loot.zip"), Some(0xCAFE_F00D), 100, None)];
+        let conns = [device("USBSTOR\\Disk", Bus::Usb, Some(50), Some(0xCAFE_F00D))];
+        let lnk = LnkSource::new(&links, Some("alice"));
+        let devices = DeviceSource::new(&conns);
+        let timeline = build_timeline(&[&lnk, &devices]);
+        let findings = audit(&timeline);
+        let f = findings
+            .iter()
+            .find(|f| f.code == "USERACT-FILE-ON-EXTERNAL-DEVICE")
+            .expect("file-on-external-device must fire when serials match");
+        assert_eq!(f.severity, Some(Severity::Medium));
+        assert_eq!(f.category, Category::Threat);
+    }
 }
