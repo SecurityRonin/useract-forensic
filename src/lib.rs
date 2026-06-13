@@ -1693,6 +1693,76 @@ mod tests {
         assert!(acts.is_empty());
     }
 
+    fn destlist(path: &str, host: &str, last_access: i64) -> lnk_core::DestListEntry {
+        lnk_core::DestListEntry {
+            droid_volume_guid: String::new(),
+            droid_file_guid: String::new(),
+            birth_droid_volume_guid: String::new(),
+            birth_droid_file_guid: String::new(),
+            hostname: host.to_string(),
+            entry_number: 1,
+            last_access,
+            pinned: false,
+            access_count: Some(3),
+            path: path.to_string(),
+        }
+    }
+
+    #[test]
+    fn jumplist_automatic_entry_becomes_accessed_file() {
+        // An automatic-destinations entry: the DestList records the target path,
+        // the MRU last-access time, and the origin host; the embedded link carries
+        // the volume serial (the device join key).
+        let link = shell_link(Some("C:\\Users\\bob\\q3.xlsx"), Some(0x1234_5678), 1_700_000_000, None);
+        let lists = [lnk_core::JumpList {
+            kind: lnk_core::JumpListKind::Automatic,
+            app_id: Some("1b4dd67f29cb1962".to_string()),
+            entries: vec![lnk_core::JumpListEntry {
+                destlist: Some(destlist("C:\\Users\\bob\\q3.xlsx", "WS01", 1_700_000_500)),
+                link,
+            }],
+        }];
+        let acts = from_jumplists(&lists, Some("bob"));
+        assert_eq!(acts.len(), 1);
+        let a = &acts[0];
+        assert_eq!(a.action, Action::Accessed);
+        assert_eq!(a.source, SourceKind::JumpList);
+        // The DestList last-access time is authoritative (preferred over the link's
+        // write_time) — it is the precise per-target MRU access timestamp.
+        assert_eq!(a.timestamp, Some(1_700_000_500));
+        assert_eq!(a.actor.as_deref(), Some("bob"));
+        assert_eq!(
+            a.subject,
+            Subject::File {
+                path: "C:\\Users\\bob\\q3.xlsx".to_string(),
+                volume_serial: Some(0x1234_5678),
+            }
+        );
+    }
+
+    #[test]
+    fn jumplist_custom_entry_falls_back_to_embedded_link() {
+        // A custom-destinations entry has no DestList: the path and timestamp come
+        // from the embedded shell link, exactly like a loose .lnk.
+        let link = shell_link(Some("D:\\report.pdf"), Some(0xAABB_CCDD), 1_690_000_000, None);
+        let lists = [lnk_core::JumpList {
+            kind: lnk_core::JumpListKind::Custom,
+            app_id: None,
+            entries: vec![lnk_core::JumpListEntry { destlist: None, link }],
+        }];
+        let acts = from_jumplists(&lists, None);
+        assert_eq!(acts.len(), 1);
+        assert_eq!(acts[0].source, SourceKind::JumpList);
+        assert_eq!(acts[0].timestamp, Some(1_690_000_000));
+        assert_eq!(
+            acts[0].subject,
+            Subject::File {
+                path: "D:\\report.pdf".to_string(),
+                volume_serial: Some(0xAABB_CCDD),
+            }
+        );
+    }
+
     #[test]
     fn lnk_source_adapter_dispatches() {
         let links = [shell_link(Some("E:\\f"), Some(1), 1, None)];
