@@ -6,6 +6,53 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [useract-forensic 0.2.0] — 2026-06-13
+
+### Added — three new actor-rich sources
+
+- **SRUM** (`from_srum` / `SrumSource`, over `srum-parser` / `srum-core`): each
+  `NetworkUsageRecord` and `AppUsageRecord` → an `Executed` `UserActivity`. The
+  integer `user_id` / `app_id` foreign keys are resolved through the
+  `SruDbIdMapTable` (`IdMapEntry`) to a user SID and application path — SRUM is the
+  first source that **attributes** activity to a specific user (`actor`). Network
+  rows carry per-interval `bytes_sent` / `bytes_recv` in `detail`; app-usage rows
+  carry foreground/background CPU cycles. Unresolved ids fall back to stable
+  `user-id:<n>` / `app-id:<n>` tokens, never dropped.
+- **Registry** (`from_registry` / `from_userassist` / `from_typed_urls` /
+  `from_shellbags` / `RegistrySource`, over `winreg-artifacts`): UserAssist →
+  `Executed` (program + run count + ROT13 last-run), TypedURLs → `Typed`
+  (address-bar URL as a `Query`), ShellBags → `Accessed` (folder). ISO-8601
+  artifact timestamps parsed to epoch; every event attributed to the hive owner.
+- **LNK** (`from_lnk` / `LnkSource`, over `lnk-core`): each `ShellLink` → an
+  `Accessed` `Subject::File` whose path is `link_info.local_base_path` (or the
+  network target's UNC name) and whose `volume_serial` is the `VolumeID`
+  `DriveSerialNumber`; the target's `write_time` becomes the timestamp.
+
+### Added — model extensions (additive)
+
+- `SourceKind` gains `Srum`, `Registry`, `LnkFile` (`#[non_exhaustive]`).
+- `Subject::File` and `Subject::Folder` are now struct variants carrying an optional
+  `volume_serial`, with `Subject::file(..)` / `Subject::folder(..)` constructors.
+  The volume-serial join reads this structured field, keeping the `vol:` detail-token
+  fallback.
+
+### Added — findings (every one a hedged observation)
+
+- `USERACT-FILE-ON-EXTERNAL-DEVICE` (Medium / Threat) — the **volume-serial join is
+  now live**: an LNK file/folder on a volume whose serial matches a `Connected`
+  external device. MITRE T1052 / T1091.
+- `USERACT-NETWORK-EXFIL-VOLUME` (Medium / Threat) — a SRUM network row whose
+  per-interval `bytes_sent` crosses the conservative `NETWORK_EXFIL_BYTES_THRESHOLD`
+  (256 MiB); a graded **lead**, not a verdict. MITRE T1048 / T1052.
+
+### Changed
+
+- `forensicnomicon` bumped `0.4` → `0.5`. `chrono` added (ISO timestamp parsing).
+- The real-data integration test now also constructs a genuine `ShellLink` +
+  `DeviceConnection` sharing a serial, a SID-attributed SRUM row, and a UserAssist
+  entry, asserting all sources merge in epoch order, the join fires, and SRUM is
+  actor-attributed.
+
 ## [useract-forensic 0.1.0] — 2026-06-13
 
 ### Added — the user-activity correlation layer
