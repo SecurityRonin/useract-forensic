@@ -1225,4 +1225,120 @@ mod tests {
             .iter()
             .all(|f| f.code != "USERACT-NETWORK-EXFIL-VOLUME"));
     }
+
+    // ── winreg-artifacts adapter (v0.2) ───────────────────────────────────────
+
+    use winreg_artifacts::shellbags::ShellbagEntry;
+    use winreg_artifacts::typed_urls::TypedUrl;
+    use winreg_artifacts::userassist::UserAssistEntry;
+
+    fn ua(program: &str, run_count: u32, last_run: Option<&str>) -> UserAssistEntry {
+        UserAssistEntry {
+            program: program.to_string(),
+            run_count,
+            focus_count: 0,
+            focus_duration_ms: 0,
+            last_run: last_run.map(ToString::to_string),
+            guid: "{CEBFF5CD-ACE2-4F4F-9178-9926F41749EA}".to_string(),
+        }
+    }
+
+    #[test]
+    fn userassist_entry_becomes_executed_with_run_count() {
+        let entries = [ua(
+            "C:\\Windows\\System32\\cmd.exe",
+            5,
+            Some("2024-06-15T08:00:00Z"),
+        )];
+        let acts = from_userassist(&entries, Some("alice"));
+        assert_eq!(acts.len(), 1);
+        let a = &acts[0];
+        assert_eq!(a.action, Action::Executed);
+        assert_eq!(a.source, SourceKind::Registry);
+        assert_eq!(
+            a.subject,
+            Subject::Command("C:\\Windows\\System32\\cmd.exe".to_string())
+        );
+        // ISO last_run is parsed to epoch (2024-06-15T08:00:00Z = 1718438400).
+        assert_eq!(a.timestamp, Some(1_718_438_400));
+        assert_eq!(a.actor.as_deref(), Some("alice"));
+        // Run count carried in detail.
+        assert!(a.detail.contains('5'));
+    }
+
+    #[test]
+    fn userassist_without_last_run_has_no_timestamp() {
+        let entries = [ua("notepad.exe", 1, None)];
+        let acts = from_userassist(&entries, None);
+        assert_eq!(acts[0].timestamp, None);
+        assert_eq!(acts[0].actor, None);
+    }
+
+    #[test]
+    fn typed_url_becomes_typed_activity() {
+        let urls = [TypedUrl {
+            url: "https://pastebin.com/abc".to_string(),
+            last_visited: Some("2024-01-02T03:04:05Z".to_string()),
+            is_suspicious: true,
+            suspicious_reason: Some("suspicious domain: pastebin.com".to_string()),
+        }];
+        let acts = from_typed_urls(&urls, None);
+        assert_eq!(acts.len(), 1);
+        assert_eq!(acts[0].action, Action::Typed);
+        assert_eq!(acts[0].source, SourceKind::Registry);
+        assert_eq!(
+            acts[0].subject,
+            Subject::Query("https://pastebin.com/abc".to_string())
+        );
+        assert!(acts[0].timestamp.is_some());
+    }
+
+    #[test]
+    fn shellbag_becomes_accessed_folder() {
+        let bags = [ShellbagEntry {
+            path: "BagMRU[slot=0, size=120 bytes]".to_string(),
+            key_path: "Software\\Microsoft\\Windows\\Shell\\BagMRU\\0".to_string(),
+            last_written: Some("2024-03-04T05:06:07Z".to_string()),
+            mru_order: vec!["0".to_string()],
+        }];
+        let acts = from_shellbags(&bags, Some("bob"));
+        assert_eq!(acts.len(), 1);
+        assert_eq!(acts[0].action, Action::Accessed);
+        assert_eq!(acts[0].source, SourceKind::Registry);
+        assert!(matches!(acts[0].subject, Subject::Folder { .. }));
+        assert_eq!(acts[0].actor.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn from_registry_merges_all_three_registry_artifacts() {
+        let ua_entries = [ua("cmd.exe", 1, Some("2024-06-15T08:00:00Z"))];
+        let urls = [TypedUrl {
+            url: "https://x.test".to_string(),
+            last_visited: None,
+            is_suspicious: false,
+            suspicious_reason: None,
+        }];
+        let bags = [ShellbagEntry {
+            path: "BagMRU[slot=0, size=10 bytes]".to_string(),
+            key_path: "k".to_string(),
+            last_written: None,
+            mru_order: vec![],
+        }];
+        let acts = from_registry(&ua_entries, &urls, &bags, Some("alice"));
+        assert_eq!(acts.len(), 3);
+        assert!(acts.iter().any(|a| a.action == Action::Executed));
+        assert!(acts.iter().any(|a| a.action == Action::Typed));
+        assert!(acts.iter().any(|a| a.action == Action::Accessed));
+        assert!(acts.iter().all(|a| a.source == SourceKind::Registry));
+        assert!(acts.iter().all(|a| a.actor.as_deref() == Some("alice")));
+    }
+
+    #[test]
+    fn registry_source_adapter_dispatches() {
+        let ua_entries = [ua("cmd.exe", 1, None)];
+        let s = RegistrySource::new(&ua_entries, &[], &[], None);
+        let acts = s.activities();
+        assert_eq!(acts.len(), 1);
+        assert_eq!(acts[0].source, SourceKind::Registry);
+    }
 }
