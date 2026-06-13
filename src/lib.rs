@@ -1,11 +1,12 @@
 //! `useract-forensic` — the user-activity correlation layer.
 //!
 //! A thin **meta / orchestration** crate: it does not parse any raw format
-//! itself. It consumes already-decoded forensic reader types — today
-//! [`shellhist_core::HistoryEntry`] and [`peripheral_core::DeviceConnection`] —
-//! normalizes them into one uniform [`UserActivity`] event, builds a per-user
-//! timeline, and emits cross-source [`forensicnomicon::report::Finding`]s that no
-//! single source could produce alone.
+//! itself. It consumes already-decoded forensic reader types —
+//! [`shellhist_core::HistoryEntry`], [`peripheral_core::DeviceConnection`], SRUM
+//! records ([`srum_core`]), registry artifacts ([`winreg_artifacts`]), and Shell
+//! Link targets ([`lnk_core::ShellLink`]) — normalizes them into one uniform
+//! [`UserActivity`] event, builds a per-user timeline, and emits cross-source
+//! [`forensicnomicon::report::Finding`]s that no single source could produce alone.
 //!
 //! Every finding is an **observation** ("consistent with …"); the examiner draws
 //! the conclusions. MITRE techniques are narrated as consistency, never a verdict.
@@ -28,13 +29,13 @@
 //! }
 //! ```
 //!
-//! ## v0.2 roadmap
+//! ## Sources
 //!
-//! New per-user sources slot in behind the [`ActivitySource`] trait without an API
-//! break: `lnk-core` (recent-file LNK, completing the **volume-serial join**),
-//! `shellbag-core` (folder access), `srum-core` (per-user app execution and network
-//! bytes by SID — the strongest source), and `winreg-artifacts`
-//! (UserAssist / RecentDocs / MRU / MountPoints2). See `docs/roadmap.md`.
+//! Every source slots in behind the [`ActivitySource`] trait: shell history and
+//! peripheral devices (v0.1) plus SRUM (per-user app/network usage by SID — the
+//! first actor-attributing source), registry artifacts (UserAssist / TypedURLs /
+//! ShellBags), and recent-file LNK targets (carrying the volume serial that
+//! completes the device join). See `docs/roadmap.md` for the v0.3 sources.
 
 #![forbid(unsafe_code)]
 

@@ -10,7 +10,7 @@
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/rust-secure-code/safety-dance)
 [![Security advisories](https://img.shields.io/badge/advisories-clean-success.svg)](deny.toml)
 
-**One per-user timeline from many artifacts — `useract-forensic` merges shell history, device connections, and (soon) LNK / shellbags / SRUM / registry MRU into a single `UserActivity` stream and surfaces the cross-source signals no one artifact can show: a command run while a USB stick was mounted, history wiped right after a payload ran.**
+**One per-user timeline from many artifacts — `useract-forensic` merges shell history, device connections, SRUM, registry artifacts, and LNK targets into a single `UserActivity` stream and surfaces the cross-source signals no one artifact can show: a file opened from a USB stick that was plugged in, a command run while a stick was mounted, history wiped right after a payload ran, a user/app that shipped gigabytes out.**
 
 It is the **correlation layer**, not another parser. It consumes the forensic fleet's already-built reader crates and normalizes their output into one uniform event — so "who did what, when, to which file / program / folder / device" reads off a single sorted list, with graded findings attached.
 
@@ -52,18 +52,17 @@ pub struct UserActivity {
 
 A new source is one `impl ActivitySource { fn activities(&self) -> Vec<UserActivity> }` away — it slots straight into `build_timeline` with no API change.
 
-## v0.1 sources, and the v0.2 roadmap
+## Sources
 
 | Source | Crate | Action | Status |
 |---|---|---|---|
 | Shell command history (bash/zsh/fish/PowerShell) | [`shellhist-core`](https://crates.io/crates/shellhist-core) | `Executed` / `HistoryTampered` | ✅ v0.1 |
 | External device connections (`setupapi.dev.log`) | [`peripheral-core`](https://crates.io/crates/peripheral-core) | `Connected` (+ volume serial) | ✅ v0.1 |
-| Recent-file LNK (and the volume serial that completes the device join) | `lnk-core` | `Accessed` (File) | v0.2 |
-| Shellbags (folder access) | `shellbag-core` | `Accessed` (Folder) | v0.2 |
-| Per-user app exec + network bytes **by SID** | `srum-core` | `Executed` / `Connected` (actor!) | v0.2 |
-| UserAssist / RecentDocs / MRU / MountPoints2 | `winreg-artifacts` | `Executed` / `Accessed` | v0.2 |
+| Per-user app exec + network bytes **by SID** | [`srum-parser`](https://crates.io/crates/srum-parser) / [`srum-core`](https://crates.io/crates/srum-core) | `Executed` (actor!) | ✅ v0.2 |
+| UserAssist / TypedURLs / ShellBags | [`winreg-artifacts`](https://crates.io/crates/winreg-artifacts) | `Executed` / `Typed` / `Accessed` | ✅ v0.2 |
+| Recent-file LNK (the volume serial that completes the device join) | [`lnk-core`](https://crates.io/crates/lnk-core) | `Accessed` (File + serial) | ✅ v0.2 |
 
-The v0.2 sources need those reader crates published first. SRUM is the strongest — the first source that attributes activity to a specific **SID**. See [`docs/roadmap.md`](docs/roadmap.md).
+SRUM is the strongest — the first source that attributes activity to a specific **SID**, resolving the SRUM integer foreign keys through the `SruDbIdMapTable`. The next sources (ShellBags via `winreg-artifacts` + a ShellItem decoder, JumpLists via `lnk` v0.2) land in v0.3. See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## The anomaly codes
 
@@ -71,10 +70,12 @@ Each finding is an **observation** ("consistent with …"); the examiner draws t
 
 | Code | Severity | Category | What it observes |
 |---|---|---|---|
+| `USERACT-FILE-ON-EXTERNAL-DEVICE` | Medium | Threat | A file/folder accessed on a volume whose serial matches a connected external device (the LNK ⋈ peripheral volume-serial join) — consistent with data movement to/from removable media (MITRE T1052 / T1091) |
+| `USERACT-NETWORK-EXFIL-VOLUME` | Medium | Threat | A SRUM network row whose per-interval `bytes_sent` crosses a conservative 256 MiB threshold — a graded **lead** (not a verdict), consistent with bulk data exfiltration (MITRE T1048 / T1052) |
 | `USERACT-EXEC-DURING-REMOVABLE-MEDIA` | Low | Threat | A shell command executed within an hour of a removable mass-storage device being connected (temporal cross-source join) — consistent with activity involving external media (MITRE T1052 / T1091) |
 | `USERACT-HISTORY-TAMPERED` | Medium | Concealment | A history-clearing activity present in the timeline — consistent with anti-forensic history tampering (MITRE T1070.003) |
 
-A **volume-serial join** seam (`device_file_volume_joins`) is implemented generically over `UserActivity` today and tested by construction; it activates with zero code change the moment a v0.2 LNK / shellbag source contributes a file subject carrying a volume serial.
+The **volume-serial join** (`device_file_volume_joins`) is live: an LNK `Subject::File` carrying a `volume_serial` (from the link's `VolumeID`) joins to a `Subject::Device` connected with the same serial, firing `USERACT-FILE-ON-EXTERNAL-DEVICE`.
 
 ## Trust, but verify
 
@@ -83,7 +84,7 @@ A **volume-serial join** seam (`device_file_volume_joins`) is implemented generi
 - **`#![forbid(unsafe_code)]`** — no FFI, no C bindings, no raw pointers.
 - **Panic-free** — the workspace denies `clippy::unwrap_used` and `clippy::expect_used` in production code; correlation degrades gracefully, never crashes.
 - **100% line coverage** on the library, `clippy -D warnings` clean.
-- **Validated on real artifacts** — the integration test feeds a `.bash_history` file written by a genuine `bash` subshell (decoded with the published `shellhist_core::parse_auto`) plus a real `peripheral_core::DeviceConnection`, and asserts the timeline merges and both findings fire (`tests/real_data.rs`).
+- **Validated on real artifacts** — the integration test feeds a `.bash_history` file written by a genuine `bash` subshell (decoded with the published `shellhist_core::parse_auto`), a real `peripheral_core::DeviceConnection`, a `lnk_core::ShellLink` and `peripheral_core::DeviceConnection` sharing a volume serial, a SRUM `NetworkUsageRecord` attributed through the `SruDbIdMapTable`, and a `winreg_artifacts` UserAssist entry — asserting the timeline merges all sources in epoch order, the volume-serial join fires `USERACT-FILE-ON-EXTERNAL-DEVICE`, and SRUM activity is actor-attributed (`tests/real_data.rs`).
 
 ```bash
 cargo add useract-forensic
