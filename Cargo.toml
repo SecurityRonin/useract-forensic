@@ -1,0 +1,65 @@
+[package]
+name = "useract-forensic"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "Apache-2.0"
+authors = ["Albert Hui <albert@securityronin.com>"]
+description = "User-activity correlation layer — merges shell-history and peripheral-device events into one per-user timeline and emits cross-source forensic findings. Single meta crate, no unsafe, panic-free."
+repository = "https://github.com/SecurityRonin/useract-forensic"
+homepage = "https://github.com/SecurityRonin/useract-forensic"
+documentation = "https://docs.rs/useract-forensic"
+readme = "README.md"
+keywords = ["forensics", "dfir", "user-activity", "incident-response", "timeline"]
+categories = ["parser-implementations", "command-line-utilities"]
+exclude = [
+    "/.github",
+    "/docs",
+    "/tests/data",
+    "/fuzz",
+    "/.pre-commit-config.yaml",
+    "/renovate.json",
+    "/.gitleaks.toml",
+    "/mkdocs.yml",
+]
+
+[dependencies]
+shellhist-core = "0.1"
+peripheral-core = "0.1"
+forensicnomicon = "0.4"
+
+[lints]
+workspace = true
+
+[workspace]
+resolver = "2"
+
+# Paranoid Gatekeeper: this crate consumes attacker-controllable, already-decoded
+# user-activity events and correlates them. Never panic, never trust a value.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all                      = { level = "warn", priority = -1 }
+pedantic                 = { level = "warn", priority = -1 }
+correctness              = { level = "deny", priority = -1 }
+suspicious               = { level = "deny", priority = -1 }
+unwrap_used              = { level = "deny", priority = 0 }
+expect_used              = { level = "deny", priority = 0 }
+module_name_repetitions  = { level = "allow", priority = 1 }
+must_use_candidate       = { level = "allow", priority = 1 }
+missing_errors_doc       = { level = "allow", priority = 1 }
+missing_panics_doc       = { level = "allow", priority = 1 }
+cast_possible_truncation = { level = "allow", priority = 1 }
+cast_possible_wrap       = { level = "allow", priority = 1 }
+cast_sign_loss           = { level = "allow", priority = 1 }
+cast_precision_loss      = { level = "allow", priority = 1 }
+too_many_lines           = { level = "allow", priority = 1 }
+items_after_statements   = { level = "allow", priority = 1 }
+similar_names            = { level = "allow", priority = 1 }
+manual_let_else          = { level = "allow", priority = 1 }
+doc_markdown             = { level = "allow", priority = 1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

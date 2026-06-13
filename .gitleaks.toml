@@ -1,0 +1,8 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "CI cache keys are not secrets"
+regexes = [
+  '''corpus-[a-z0-9]+-v[0-9]+''',
+]

