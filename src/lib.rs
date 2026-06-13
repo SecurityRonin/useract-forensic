@@ -819,4 +819,165 @@ mod tests {
         let acts: Vec<UserActivity> = s.activities();
         assert_eq!(acts[0].actor.as_deref(), Some("bob"));
     }
+
+    // ── SRUM adapter (v0.2) ───────────────────────────────────────────────────
+
+    use srum_core::{AppUsageRecord, IdMapEntry, NetworkUsageRecord};
+
+    fn utc(epoch: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(epoch, 0).expect("valid epoch")
+    }
+
+    #[test]
+    fn srum_network_row_is_executed_and_actor_attributed() {
+        // user_id and app_id are integers resolved through the id-map.
+        let id_map = [
+            IdMapEntry {
+                id: 7,
+                name: "S-1-5-21-1-2-3-1001".to_string(),
+            },
+            IdMapEntry {
+                id: 42,
+                name: "\\Device\\HarddiskVolume3\\Windows\\explorer.exe".to_string(),
+            },
+        ];
+        let net = [NetworkUsageRecord {
+            app_id: 42,
+            user_id: 7,
+            timestamp: utc(1_700_000_000),
+            bytes_sent: 4096,
+            bytes_recv: 1024,
+            auto_inc_id: 0,
+        }];
+        let acts = from_srum(&net, &[], &id_map);
+        assert_eq!(acts.len(), 1);
+        let a = &acts[0];
+        assert_eq!(a.action, Action::Executed);
+        assert_eq!(a.source, SourceKind::Srum);
+        assert_eq!(a.timestamp, Some(1_700_000_000));
+        // First source that ATTRIBUTES to a specific user SID.
+        assert_eq!(a.actor.as_deref(), Some("S-1-5-21-1-2-3-1001"));
+        // App resolves through the id-map.
+        assert_eq!(
+            a.subject,
+            Subject::Command("\\Device\\HarddiskVolume3\\Windows\\explorer.exe".to_string())
+        );
+        // Network volume surfaced in the detail.
+        assert!(a.detail.contains("4096"));
+        assert!(a.detail.contains("1024"));
+    }
+
+    #[test]
+    fn srum_unresolved_user_id_falls_back_to_numeric_token() {
+        // No id-map entry for the user → actor is a stable synthetic token, never lost.
+        let net = [NetworkUsageRecord {
+            app_id: 1,
+            user_id: 99,
+            timestamp: utc(10),
+            bytes_sent: 1,
+            bytes_recv: 2,
+            auto_inc_id: 0,
+        }];
+        let acts = from_srum(&net, &[], &[]);
+        assert_eq!(acts.len(), 1);
+        assert_eq!(acts[0].actor.as_deref(), Some("user-id:99"));
+        // App also falls back when unresolved.
+        assert_eq!(acts[0].subject, Subject::Command("app-id:1".to_string()));
+    }
+
+    #[test]
+    fn srum_app_usage_row_is_executed_and_actor_attributed() {
+        let id_map = [
+            IdMapEntry {
+                id: 5,
+                name: "S-1-5-21-9-9-9-500".to_string(),
+            },
+            IdMapEntry {
+                id: 8,
+                name: "C:\\Tools\\rclone.exe".to_string(),
+            },
+        ];
+        let app = [AppUsageRecord {
+            app_id: 8,
+            user_id: 5,
+            timestamp: utc(1_700_000_500),
+            foreground_cycles: 900_000,
+            background_cycles: 100,
+            auto_inc_id: 0,
+        }];
+        let acts = from_srum(&[], &app, &id_map);
+        assert_eq!(acts.len(), 1);
+        assert_eq!(acts[0].action, Action::Executed);
+        assert_eq!(acts[0].source, SourceKind::Srum);
+        assert_eq!(acts[0].actor.as_deref(), Some("S-1-5-21-9-9-9-500"));
+        assert_eq!(
+            acts[0].subject,
+            Subject::Command("C:\\Tools\\rclone.exe".to_string())
+        );
+    }
+
+    #[test]
+    fn srum_source_adapter_dispatches() {
+        let net = [NetworkUsageRecord {
+            app_id: 1,
+            user_id: 1,
+            timestamp: utc(1),
+            bytes_sent: 1,
+            bytes_recv: 1,
+            auto_inc_id: 0,
+        }];
+        let s = SrumSource::new(&net, &[], &[]);
+        let acts = s.activities();
+        assert_eq!(acts.len(), 1);
+        assert_eq!(acts[0].source, SourceKind::Srum);
+    }
+
+    // ── audit: USERACT-NETWORK-EXFIL-VOLUME (v0.2) ────────────────────────────
+
+    #[test]
+    fn audit_fires_network_exfil_volume_above_threshold() {
+        let id_map = [
+            IdMapEntry {
+                id: 7,
+                name: "S-1-5-21-1-2-3-1001".to_string(),
+            },
+            IdMapEntry {
+                id: 42,
+                name: "rclone.exe".to_string(),
+            },
+        ];
+        let net = [NetworkUsageRecord {
+            app_id: 42,
+            user_id: 7,
+            timestamp: utc(1_700_000_000),
+            bytes_sent: NETWORK_EXFIL_BYTES_THRESHOLD + 1,
+            bytes_recv: 0,
+            auto_inc_id: 0,
+        }];
+        let acts = from_srum(&net, &[], &id_map);
+        let findings = audit(&acts);
+        let f = findings
+            .iter()
+            .find(|f| f.code == "USERACT-NETWORK-EXFIL-VOLUME")
+            .expect("network-exfil-volume must fire above threshold");
+        assert_eq!(f.severity, Some(Severity::Medium));
+        assert_eq!(f.category, Category::Threat);
+    }
+
+    #[test]
+    fn audit_does_not_fire_network_exfil_below_threshold() {
+        let net = [NetworkUsageRecord {
+            app_id: 1,
+            user_id: 1,
+            timestamp: utc(1),
+            bytes_sent: NETWORK_EXFIL_BYTES_THRESHOLD - 1,
+            bytes_recv: 0,
+            auto_inc_id: 0,
+        }];
+        let acts = from_srum(&net, &[], &[]);
+        let findings = audit(&acts);
+        assert!(findings
+            .iter()
+            .all(|f| f.code != "USERACT-NETWORK-EXFIL-VOLUME"));
+    }
 }
