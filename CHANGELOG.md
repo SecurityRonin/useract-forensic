@@ -6,6 +6,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [useract-forensic 0.3.1] — 2026-06-15
+
+### Added
+
+- **Biome App.MenuItem ActivitySource** (`BiomeMenuItemSource` /
+  `from_biome_menu_items`). Decoded Apple Biome `App.MenuItem` records (SEGB
+  container via `segb-core`) become `MenuSelected` activity events on the
+  per-user timeline, capturing application + menu-item selection intent. New
+  `SourceKind::BiomeMenuItem` (the enum is `#[non_exhaustive]`, so this is a
+  backwards-compatible addition).
+
+### Changed
+
+- Depend on published `segb-core` 0.1 from crates.io instead of a local path
+  dependency.
+
 ## [useract-forensic 0.3.0] — 2026-06-13
 
 ### Added

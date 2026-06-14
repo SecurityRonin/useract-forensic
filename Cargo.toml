@@ -1,6 +1,6 @@
 [package]
 name = "useract-forensic"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 rust-version = "1.81"
 license = "Apache-2.0"
@@ -32,7 +32,7 @@ winreg-artifacts = "0.1.1"
 lnk-core = "0.3"
 forensicnomicon = "0.5"
 chrono = { version = "0.4", default-features = false }
-segb = { path = "../segb-core/core", package = "segb-core" }
+segb = { version = "0.1", package = "segb-core" }
 
 [lints]
 workspace = true
