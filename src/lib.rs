@@ -1910,4 +1910,78 @@ mod tests {
         assert_eq!(f.severity, Some(Severity::Medium));
         assert_eq!(f.category, Category::Threat);
     }
+
+    // ── from_biome_menu_items ─────────────────────────────────────────────────
+
+    #[test]
+    fn menu_item_record_becomes_menu_selected_activity() {
+        let records = [segb::menuitem::AppMenuItemRecord {
+            application: Some("Finder".to_string()),
+            menu_item: Some("Move to Trash".to_string()),
+            timestamp_unix: Some(1_700_000_000.0_f64),
+        }];
+        let acts = from_biome_menu_items(&records, Some("alice"));
+        assert_eq!(acts.len(), 1);
+        let a = &acts[0];
+        assert_eq!(a.action, Action::MenuSelected);
+        assert_eq!(a.source, SourceKind::BiomeMenuItem);
+        assert_eq!(a.timestamp, Some(1_700_000_000_i64));
+        assert_eq!(a.actor.as_deref(), Some("alice"));
+        assert_eq!(a.subject, Subject::Command("Finder: Move to Trash".to_string()));
+        assert_eq!(a.detail, "Finder: Move to Trash");
+    }
+
+    #[test]
+    fn menu_item_record_no_actor() {
+        let records = [segb::menuitem::AppMenuItemRecord {
+            application: Some("TextEdit".to_string()),
+            menu_item: Some("Save\u{2026}".to_string()),
+            timestamp_unix: Some(1_700_000_100.0_f64),
+        }];
+        let acts = from_biome_menu_items(&records, None);
+        assert_eq!(acts.len(), 1);
+        assert_eq!(acts[0].actor, None);
+        assert_eq!(acts[0].detail, "TextEdit: Save\u{2026}");
+        assert_eq!(
+            acts[0].subject,
+            Subject::Command("TextEdit: Save\u{2026}".to_string())
+        );
+    }
+
+    #[test]
+    fn menu_item_record_with_no_menu_item_is_skipped() {
+        // A record without menu_item carries no actionable label — skip it.
+        let records = [segb::menuitem::AppMenuItemRecord {
+            application: Some("Finder".to_string()),
+            menu_item: None,
+            timestamp_unix: Some(1_700_000_200.0_f64),
+        }];
+        let acts = from_biome_menu_items(&records, None);
+        assert!(acts.is_empty(), "records with no menu_item must be skipped");
+    }
+
+    #[test]
+    fn menu_item_record_with_no_timestamp_yields_none_timestamp() {
+        let records = [segb::menuitem::AppMenuItemRecord {
+            application: Some("Safari".to_string()),
+            menu_item: Some("Open in New Tab".to_string()),
+            timestamp_unix: None,
+        }];
+        let acts = from_biome_menu_items(&records, None);
+        assert_eq!(acts.len(), 1);
+        assert_eq!(acts[0].timestamp, None);
+    }
+
+    #[test]
+    fn biome_menu_item_source_adapter_dispatches() {
+        let records = [segb::menuitem::AppMenuItemRecord {
+            application: Some("Mail".to_string()),
+            menu_item: Some("Reply".to_string()),
+            timestamp_unix: Some(1_700_001_000.0_f64),
+        }];
+        let src = BiomeMenuItemSource::new(&records, None);
+        let acts = src.activities();
+        assert_eq!(acts.len(), 1);
+        assert_eq!(acts[0].source, SourceKind::BiomeMenuItem);
+    }
 }

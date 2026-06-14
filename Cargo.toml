@@ -32,6 +32,7 @@ winreg-artifacts = "0.1.1"
 lnk-core = "0.3"
 forensicnomicon = "0.5"
 chrono = { version = "0.4", default-features = false }
+segb-core = { path = "../segb-core/core", package = "segb-core" }
 
 [lints]
 workspace = true
