@@ -58,6 +58,13 @@ pub enum Action {
     Typed,
     /// Disabled, cleared, or otherwise tampered with an activity record.
     HistoryTampered,
+    /// Selected a menu item in an application's menu bar.
+    ///
+    /// Sourced from Apple Biome `App.MenuItem` records. Represents a deliberate
+    /// UI interaction — the user explicitly opened a menu and chose an item —
+    /// distinct from [`Action::Executed`] (program launch) and
+    /// [`Action::Accessed`] (file open).
+    MenuSelected,
 }
 
 /// The thing an [`Action`] was performed on.
@@ -140,6 +147,16 @@ pub enum SourceKind {
     /// `*.customDestinations-ms`) — per-application recent/pinned items, with the
     /// `DestList` MRU last-access time and origin host.
     JumpList,
+    /// `segb-core` — Apple Biome `App.MenuItem` records (macOS Tahoe 26+).
+    ///
+    /// Each record captures a menu-bar item selection: the application name and
+    /// the exact text of the item chosen. Stored in SEGB container files under
+    /// `~/Library/Biome/streams/restricted/App.MenuItem/local`.
+    ///
+    /// **Validation caveat**: the protobuf field numbers in `segb-core` are
+    /// inferred from published research; validation against a real macOS Tahoe 26
+    /// sample is pending. See `segb-core/docs/validation.md`.
+    BiomeMenuItem,
 }
 
 /// One normalized user-activity event: *who* did *what*, *when*, to *which* subject.
@@ -718,6 +735,85 @@ pub fn from_registry(
     acts.extend(from_typed_urls(typed_urls, actor));
     acts.extend(from_shellbags(shellbags, actor));
     acts
+}
+
+/// A [`BiomeMenuItemSource`] wraps decoded Apple Biome `App.MenuItem` records.
+///
+/// Each record captures a deliberate menu-bar selection: the application name
+/// and the exact text of the chosen item. Records without a `menu_item` text
+/// are skipped — they carry no actionable label.
+///
+/// Stored in SEGB container files under
+/// `~/Library/Biome/streams/restricted/App.MenuItem/local` (macOS Tahoe 26+).
+///
+/// **Validation caveat**: the `segb-core` protobuf field numbers for this
+/// stream are inferred from published research; validation against a real
+/// macOS Tahoe 26 sample is pending. See `segb-core/docs/validation.md`.
+pub struct BiomeMenuItemSource<'a> {
+    records: &'a [segb::menuitem::AppMenuItemRecord],
+    actor: Option<String>,
+}
+
+impl<'a> BiomeMenuItemSource<'a> {
+    /// Wrap decoded `App.MenuItem` records, attributing them to a user when known.
+    #[must_use]
+    pub fn new(
+        records: &'a [segb::menuitem::AppMenuItemRecord],
+        actor: Option<&str>,
+    ) -> Self {
+        Self {
+            records,
+            actor: actor.map(ToString::to_string),
+        }
+    }
+}
+
+impl ActivitySource for BiomeMenuItemSource<'_> {
+    fn activities(&self) -> Vec<UserActivity> {
+        from_biome_menu_items(self.records, self.actor.as_deref())
+    }
+}
+
+/// Normalize decoded Biome `App.MenuItem` records into [`Action::MenuSelected`]
+/// [`UserActivity`] events.
+///
+/// Each record whose `menu_item` field is present yields one event. The
+/// `subject` is a [`Subject::Command`] whose value is `"<application>: <menu_item>"`
+/// (or just `"<menu_item>"` when `application` is absent) — the combined label
+/// is the most useful single string for timeline review. Records with no
+/// `menu_item` are skipped rather than emitting a label-less event.
+///
+/// The `timestamp_unix` field (seconds since 1970 as `f64`, forwarded from the
+/// SEGB record header) is truncated to `i64`; a `None` or non-finite value
+/// becomes `None`.
+///
+/// **Validation caveat**: see [`BiomeMenuItemSource`].
+#[must_use]
+pub fn from_biome_menu_items(
+    records: &[segb::menuitem::AppMenuItemRecord],
+    actor: Option<&str>,
+) -> Vec<UserActivity> {
+    records
+        .iter()
+        .filter_map(|r| {
+            let menu_item = r.menu_item.as_deref()?;
+            let label = match r.application.as_deref() {
+                Some(app) => format!("{app}: {menu_item}"),
+                None => menu_item.to_string(),
+            };
+            let timestamp = r
+                .timestamp_unix
+                .and_then(|t| t.is_finite().then_some(t as i64));
+            Some(UserActivity {
+                timestamp,
+                actor: actor.map(ToString::to_string),
+                action: Action::MenuSelected,
+                subject: Subject::Command(label.clone()),
+                source: SourceKind::BiomeMenuItem,
+                detail: label,
+            })
+        })
+        .collect()
 }
 
 /// Merge any number of [`ActivitySource`]s into one timeline, sorted by timestamp.
