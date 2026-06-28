@@ -1,6 +1,6 @@
 [package]
 name = "useract-forensic"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.81"
 license = "Apache-2.0"
@@ -26,13 +26,13 @@ exclude = [
 [dependencies]
 shellhist-core = "0.1"
 peripheral-core = "0.1"
-srum-parser = "0.1"
+srum-parser = "0.2"
 srum-core = "0.1"
-winreg-artifacts = "0.2"
-lnk-core = "0.3"
+winreg-artifacts = "0.3"
+lnk-core = "0.4"
 forensicnomicon = "1"
 chrono = { version = "0.4", default-features = false }
-segb = { version = "0.1", package = "segb-core" }
+segb = { version = "0.2", package = "segb-core" }
 
 [lints]
 workspace = true
