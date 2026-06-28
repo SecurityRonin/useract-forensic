@@ -30,7 +30,7 @@ srum-parser = "0.1"
 srum-core = "0.1"
 winreg-artifacts = "0.2"
 lnk-core = "0.3"
-forensicnomicon = "0.11"
+forensicnomicon = "1"
 chrono = { version = "0.4", default-features = false }
 segb = { version = "0.1", package = "segb-core" }
 
