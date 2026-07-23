@@ -83,7 +83,7 @@ The **volume-serial join** (`device_file_volume_joins`) is live: an LNK `Subject
 `useract-forensic` consumes attacker-controllable, already-decoded evidence and correlates it:
 
 - **`#![forbid(unsafe_code)]`** — no FFI, no C bindings, no raw pointers.
-- **Panic-free** — the workspace denies `clippy::unwrap_used` and `clippy::expect_used` in production code; correlation degrades gracefully, never crashes.
+- **Panic-free by lint** — the workspace denies `clippy::unwrap_used` and `clippy::expect_used` in production code; correlation degrades gracefully, never crashes.
 - **100% line coverage** on the library, `clippy -D warnings` clean.
 - **Validated on real artifacts** — the integration test feeds a `.bash_history` file written by a genuine `bash` subshell (decoded with the published `shellhist_core::parse_auto`), a real `peripheral_core::DeviceConnection`, a `lnk_core::ShellLink` and `peripheral_core::DeviceConnection` sharing a volume serial, a SRUM `NetworkUsageRecord` attributed through the `SruDbIdMapTable`, and a `winreg_artifacts` UserAssist entry — asserting the timeline merges all sources in epoch order, the volume-serial join fires `USERACT-FILE-ON-EXTERNAL-DEVICE`, and SRUM activity is actor-attributed (`tests/real_data.rs`).
 
