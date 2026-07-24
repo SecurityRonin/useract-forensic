@@ -757,10 +757,7 @@ pub struct BiomeMenuItemSource<'a> {
 impl<'a> BiomeMenuItemSource<'a> {
     /// Wrap decoded `App.MenuItem` records, attributing them to a user when known.
     #[must_use]
-    pub fn new(
-        records: &'a [segb::menuitem::AppMenuItemRecord],
-        actor: Option<&str>,
-    ) -> Self {
+    pub fn new(records: &'a [segb::menuitem::AppMenuItemRecord], actor: Option<&str>) -> Self {
         Self {
             records,
             actor: actor.map(ToString::to_string),
@@ -1971,6 +1968,48 @@ mod tests {
     }
 
     #[test]
+    fn jumplist_network_target_falls_back_to_unc_path() {
+        // No local_base_path and no DestList: the embedded link's
+        // CommonNetworkRelativeLink net name supplies the target path.
+        let link = shell_link(None, None, 1_695_000_000, Some("\\\\nas\\team\\plan.docx"));
+        let lists = [lnk_core::JumpList {
+            kind: lnk_core::JumpListKind::Custom,
+            app_id: None,
+            entries: vec![lnk_core::JumpListEntry {
+                destlist: None,
+                link,
+            }],
+        }];
+        let acts = from_jumplists(&lists, None);
+        assert_eq!(acts.len(), 1);
+        assert_eq!(
+            acts[0].subject,
+            Subject::File {
+                path: "\\\\nas\\team\\plan.docx".to_string(),
+                volume_serial: None,
+            }
+        );
+    }
+
+    #[test]
+    fn jumplist_source_adapter_dispatches() {
+        let link = shell_link(Some("C:\\x.docx"), Some(7), 1_700_000_000, None);
+        let lists = [lnk_core::JumpList {
+            kind: lnk_core::JumpListKind::Automatic,
+            app_id: Some("1b4dd67f29cb1962".to_string()),
+            entries: vec![lnk_core::JumpListEntry {
+                destlist: Some(destlist("C:\\x.docx", "WS01", 1_700_000_500)),
+                link,
+            }],
+        }];
+        let s = JumpListSource::new(&lists, Some("bob"));
+        let acts = s.activities();
+        assert_eq!(acts.len(), 1);
+        assert_eq!(acts[0].source, SourceKind::JumpList);
+        assert_eq!(acts[0].actor.as_deref(), Some("bob"));
+    }
+
+    #[test]
     fn lnk_source_adapter_dispatches() {
         let links = [shell_link(Some("E:\\f"), Some(1), 1, None)];
         let s = LnkSource::new(&links, None);
@@ -2023,7 +2062,10 @@ mod tests {
         assert_eq!(a.source, SourceKind::BiomeMenuItem);
         assert_eq!(a.timestamp, Some(1_700_000_000_i64));
         assert_eq!(a.actor.as_deref(), Some("alice"));
-        assert_eq!(a.subject, Subject::Command("Finder: Move to Trash".to_string()));
+        assert_eq!(
+            a.subject,
+            Subject::Command("Finder: Move to Trash".to_string())
+        );
         assert_eq!(a.detail, "Finder: Move to Trash");
     }
 
@@ -2042,6 +2084,20 @@ mod tests {
             acts[0].subject,
             Subject::Command("TextEdit: Save\u{2026}".to_string())
         );
+    }
+
+    #[test]
+    fn menu_item_record_without_application_uses_bare_menu_item() {
+        // No owning application: the label is the bare menu-item text, unqualified.
+        let records = [segb::menuitem::AppMenuItemRecord {
+            application: None,
+            menu_item: Some("Empty Trash".to_string()),
+            timestamp_unix: Some(1_700_000_300.0_f64),
+        }];
+        let acts = from_biome_menu_items(&records, None);
+        assert_eq!(acts.len(), 1);
+        assert_eq!(acts[0].detail, "Empty Trash");
+        assert_eq!(acts[0].subject, Subject::Command("Empty Trash".to_string()));
     }
 
     #[test]

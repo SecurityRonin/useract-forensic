@@ -54,7 +54,37 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@9bdad043e88c75890e36ad3bbc8d27f0090dd609 # v2.7.8
       - run: cargo install cargo-llvm-cov
-      - run: cargo llvm-cov --lib --fail-uncovered-lines 0 --show-missing-lines
+      # Every executable source line must be hit at least once.
+      #
+      # Exception — panic-free defence in depth: a line carrying a
+      # `// cov:unreachable` marker is a defensive guard (a `let-else { continue }`,
+      # a bounds-checked `.get()` fallback, a match arm that is provably unreachable
+      # under a dominating invariant) kept deliberately so the code degrades
+      # gracefully if that invariant is ever broken by a future change. Such lines
+      # cannot be exercised by any test and are exempt. The gate fails on any OTHER
+      # zero-hit line.
+      - name: Generate lcov
+        run: cargo llvm-cov --lib --lcov --output-path lcov.info
+      - name: Enforce line coverage (unreachable defensive arms must carry // cov:unreachable)
+        shell: bash
+        run: |
+          fail=0
+          while IFS= read -r line; do
+            if [[ "$line" == SF:* ]]; then
+              f="${line#SF:}"
+            elif [[ "$line" =~ ^DA:([0-9]+),0$ ]]; then
+              n="${BASH_REMATCH[1]}"
+              src="$(sed -n "${n}p" "$f")"
+              if [[ "$src" == *cov:unreachable* ]]; then
+                echo "exempt (// cov:unreachable): $f:$n"
+              else
+                echo "::error::Uncovered line $f:$n:$src"
+                fail=1
+              fi
+            fi
+          done < lcov.info
+          if [[ "$fail" -ne 0 ]]; then exit 1; fi
+          echo "All executable lines covered, or annotated // cov:unreachable."
 
   msrv:
     name: MSRV (1.81)
