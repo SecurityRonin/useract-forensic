@@ -6,6 +6,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/SecurityRonin/useract-forensic/compare/useract-forensic-v0.4.0...useract-forensic-v0.4.1) - 2026-07-24
+
+### Documentation
+
+- *(readme)* align robustness wording with fleet standard (fuzzed + panic-free-by-lint pairing)
+- use verbatim Apache-2.0 license text
+
 ## [useract-forensic 0.3.1] — 2026-06-15
 
 ### Added
