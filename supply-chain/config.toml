@@ -17,7 +17,7 @@ url = "https://raw.githubusercontent.com/google/rust-crate-audits/main/audits.to
 url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 
 [policy.useract-forensic]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [[exemptions.autocfg]]
 version = "1.5.1"
@@ -185,10 +185,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.unicode-ident]]
 version = "1.0.24"
-criteria = "safe-to-deploy"
-
-[[exemptions.useract-forensic]]
-version = "0.4.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.uuid]]
