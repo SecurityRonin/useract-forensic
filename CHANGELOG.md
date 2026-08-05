@@ -6,6 +6,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.2](https://github.com/SecurityRonin/useract-forensic/compare/useract-forensic-v0.4.1...useract-forensic-v0.4.2) - 2026-08-05
+
+### Fixed
+
+- *(supply-chain)* trust our own crates instead of exempting them
+
 ## [0.4.1](https://github.com/SecurityRonin/useract-forensic/compare/useract-forensic-v0.4.0...useract-forensic-v0.4.1) - 2026-07-25
 
 ### Documentation
