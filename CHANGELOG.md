@@ -6,6 +6,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.3](https://github.com/SecurityRonin/useract-forensic/compare/useract-forensic-v0.4.2...useract-forensic-v0.4.3) - 2026-08-08
+
+### Fixed
+
+- *(supply-chain)* vet records for the versions the MSRV pin resolves
+
 ## [0.4.2](https://github.com/SecurityRonin/useract-forensic/compare/useract-forensic-v0.4.1...useract-forensic-v0.4.2) - 2026-08-05
 
 ### Fixed
