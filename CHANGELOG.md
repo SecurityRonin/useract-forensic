@@ -6,6 +6,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.4](https://github.com/SecurityRonin/useract-forensic/compare/useract-forensic-v0.4.3...useract-forensic-v0.4.4) - 2026-08-20
+
+### Fixed
+
+- *(gitignore)* unanchor the target rule so nested cargo projects are ignored
+
 ## [0.4.3](https://github.com/SecurityRonin/useract-forensic/compare/useract-forensic-v0.4.2...useract-forensic-v0.4.3) - 2026-08-08
 
 ### Fixed
